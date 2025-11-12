@@ -511,12 +511,16 @@ pub struct SettleHoldInvoiceRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MakeOfferRequest {
     /// Amount in millisatoshis
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<u64>,
     /// Invoice description
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Invoice expiry in seconds
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expiry: Option<u64>,
     /// Offer Issuer
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
 }
 
@@ -530,11 +534,16 @@ pub struct LookupOfferRequest {
 /// Pay Offer Request
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PayOfferRequest {
+    /// Optional id
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// Encoded bolt12 Offer
     pub offer: String,
     /// Amount in millisatoshis
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<u64>,
     /// Payer note to be included in the bolt12 invoice
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub payer_note: Option<String>,
 }
 
