@@ -176,6 +176,8 @@ pub enum Method {
     PayOffer,
     /// Multo pay bolt12 offers
     MultiPayOffer,
+    /// Decode an offer
+    GetOfferInfo,
 }
 
 impl fmt::Display for Method {
@@ -204,6 +206,7 @@ impl Method {
             Self::LookupOffer => "lookup_offer",
             Self::PayOffer => "pay_offer",
             Self::MultiPayOffer => "multi_pay_offer",
+            Self::GetOfferInfo => "get_offer_info",
         }
     }
 }
@@ -229,6 +232,7 @@ impl FromStr for Method {
             "lookup_offer" => Ok(Self::LookupOffer),
             "pay_offer" => Ok(Self::PayOffer),
             "multi_pay_offer" => Ok(Self::MultiPayOffer),
+            "get_offer_info" => Ok(Self::GetOfferInfo),
             _ => Err(Error::UnknownMethod),
         }
     }
@@ -288,6 +292,8 @@ pub enum RequestParams {
     PayOffer(PayOfferRequest),
     /// Multiple Pay Offer
     MultiPayOffer(MultiPayOfferRequest),
+    /// Decode an offer
+    GetOfferInfo(GetOfferInfoRequest),
 }
 
 impl Serialize for RequestParams {
@@ -318,6 +324,7 @@ impl Serialize for RequestParams {
             RequestParams::LookupOffer(p) => p.serialize(serializer),
             RequestParams::PayOffer(p) => p.serialize(serializer),
             RequestParams::MultiPayOffer(p) => p.serialize(serializer),
+            RequestParams::GetOfferInfo(p) => p.serialize(serializer),
         }
     }
 }
@@ -510,18 +517,27 @@ pub struct SettleHoldInvoiceRequest {
 /// Make Offer Request
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MakeOfferRequest {
+    /// ISO 4217 code of the currency (3 characters), (missing means msat)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    /// Number of decimals to apply to the amount, for currency different than msat
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency_minor_unit: Option<u64>,
     /// Amount in millisatoshis
     #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<u64>,
     /// Invoice description
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Invoice expiry in seconds
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expiry: Option<u64>,
     /// Offer Issuer
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
+    /// Absolute expiry time of the offer
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub absolute_expiry: Option<u64>,
+    /// Only allow the offer to be used once, default false
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub single_use: Option<bool>,
 }
 
 /// Lookup Offer Request
@@ -554,6 +570,12 @@ pub struct MultiPayOfferRequest {
     pub offers: Vec<PayOfferRequest>,
 }
 
+/// Decode an offer
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GetOfferInfoRequest {
+    /// Encoded bolt12 Offer
+    pub offer: String,
+}
 /// NIP47 Request
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Request {
@@ -708,6 +730,10 @@ impl Request {
                 let params: MultiPayOfferRequest = serde_json::from_value(template.params)?;
                 RequestParams::MultiPayOffer(params)
             }
+            Method::GetOfferInfo => {
+                let params: GetOfferInfoRequest = serde_json::from_value(template.params)?;
+                RequestParams::GetOfferInfo(params)
+            }
         };
 
         Ok(Self {
@@ -825,6 +851,14 @@ pub struct LookupInvoiceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "deserialize_empty_string_as_none")]
     pub description_hash: Option<String>,
+    /// offer's issuer for a bolt12 transaction
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub offer_issuer: Option<String>,
+    /// note from payer for a bolt12 transaction
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub payer_note: Option<String>,
     /// Payment preimage
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -832,6 +866,10 @@ pub struct LookupInvoiceResponse {
     pub preimage: Option<String>,
     /// Payment hash
     pub payment_hash: String,
+    /// the id of the offer, for a bolt12 invoice
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub offer_id: Option<String>,
     /// Amount in millisatoshis
     pub amount: u64,
     /// Fees paid in millisatoshis
@@ -933,26 +971,29 @@ pub struct MakeHoldInvoiceResponse {
 /// Make Offer Response
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MakeOfferResponse {
-    /// Transaction type
-    #[serde(rename = "type")]
-    pub transaction_type: TransactionType,
     /// Encoded bolt12 offer
     pub offer: String,
     /// OFfer description
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Offer amount in msats
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub amount: Option<u64>,
     /// Offer issuer
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
+    /// ISO 4217 code of the currency (3 characters), (missing means msat)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    /// Number of decimals to apply to the amount, for currency different than msat
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency_minor_unit: Option<u64>,
+    /// Offer amount in msats
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<u64>,
+    /// Only allow the offer to be used once, default false
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub single_use: Option<bool>,
     /// Offer expiry
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<Timestamp>,
-    /// Offer metadata
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Value>,
 }
 
 /// Cancel Hold Invoice Response
@@ -971,15 +1012,20 @@ pub struct LookupOfferResponse {
     /// Encoded bolt12 offer
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offer: Option<String>,
-    /// OFfer description
+    /// Offer description
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Offer amount in msats
     #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<u64>,
+    /// the id of the offer, for a bolt12 invoice
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer_id: Option<String>,
     /// Offer issuer
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
+    /// Offer creation time
+    pub created_at: Timestamp,
     /// Offer expiry
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<Timestamp>,
@@ -993,6 +1039,30 @@ pub struct LookupOfferResponse {
 pub struct PayOfferResponse {
     pub preimage: String,
     pub fees_paid: Option<u64>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GetOfferInfoResponse {
+    /// Encoded bolt12 offer
+    pub offer: String,
+    /// Offer description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Offer issuer
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// ISO 4217 code of the currency (3 characters), (missing means msat)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    /// Number of decimals to apply to the amount, for currency different than msat
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency_minor_unit: Option<u64>,
+    /// Offer amount in msats
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<u64>,
+    /// Offer expiry
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
 }
 
 /// NIP47 Response Result
@@ -1030,6 +1100,8 @@ pub enum ResponseResult {
     PayOffer(PayOfferResponse),
     /// Multiple Pay Offer
     MultiPayOffer(PayOfferResponse),
+    /// Decode an offer
+    GetOfferInfo(GetOfferInfoResponse),
 }
 
 impl Serialize for ResponseResult {
@@ -1058,6 +1130,7 @@ impl Serialize for ResponseResult {
             ResponseResult::LookupOffer(p) => p.serialize(serializer),
             ResponseResult::PayOffer(p) => p.serialize(serializer),
             ResponseResult::MultiPayOffer(p) => p.serialize(serializer),
+            ResponseResult::GetOfferInfo(p) => p.serialize(serializer),
         }
     }
 }
@@ -1170,6 +1243,10 @@ impl Response {
                 Method::MultiPayOffer => {
                     let result: PayOfferResponse = serde_json::from_value(result)?;
                     ResponseResult::MultiPayOffer(result)
+                }
+                Method::GetOfferInfo => {
+                    let result: GetOfferInfoResponse = serde_json::from_value(result)?;
+                    ResponseResult::GetOfferInfo(result)
                 }
             };
 
@@ -1799,6 +1876,9 @@ mod tests {
                     metadata: None,
                     settled_at: None,
                     preimage: None,
+                    offer_issuer: None,
+                    payer_note: None,
+                    offer_id: None,
                 },
             ])),
             result_type: Method::ListTransactions,
@@ -1849,7 +1929,10 @@ mod tests {
                     payment_hash: String::new(),
                     metadata: None,
                     settled_at: None,
-                    preimage: None
+                    preimage: None,
+                    offer_issuer: None,
+                    payer_note: None,
+                    offer_id: None
                 }
             ]))
         )
