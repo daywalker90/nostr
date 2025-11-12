@@ -172,6 +172,10 @@ pub enum Method {
     MakeOffer,
     /// Lookup a bolt12 offer
     LookupOffer,
+    /// Pay a bolt12 offer
+    PayOffer,
+    /// Multo pay bolt12 offers
+    MultiPayOffer,
 }
 
 impl fmt::Display for Method {
@@ -198,6 +202,8 @@ impl Method {
             Self::SettleHoldInvoice => "settle_hold_invoice",
             Self::MakeOffer => "make_offer",
             Self::LookupOffer => "lookup_offer",
+            Self::PayOffer => "pay_offer",
+            Self::MultiPayOffer => "multi_pay_offer",
         }
     }
 }
@@ -221,6 +227,8 @@ impl FromStr for Method {
             "settle_hold_invoice" => Ok(Self::SettleHoldInvoice),
             "make_offer" => Ok(Self::MakeOffer),
             "lookup_offer" => Ok(Self::LookupOffer),
+            "pay_offer" => Ok(Self::PayOffer),
+            "multi_pay_offer" => Ok(Self::MultiPayOffer),
             _ => Err(Error::UnknownMethod),
         }
     }
@@ -276,6 +284,10 @@ pub enum RequestParams {
     MakeOffer(MakeOfferRequest),
     /// Lookup Offer
     LookupOffer(LookupOfferRequest),
+    /// Pay Offer
+    PayOffer(PayOfferRequest),
+    /// Multiple Pay Offer
+    MultiPayOffer(MultiPayOfferRequest),
 }
 
 impl Serialize for RequestParams {
@@ -304,6 +316,8 @@ impl Serialize for RequestParams {
             RequestParams::SettleHoldInvoice(p) => p.serialize(serializer),
             RequestParams::MakeOffer(p) => p.serialize(serializer),
             RequestParams::LookupOffer(p) => p.serialize(serializer),
+            RequestParams::PayOffer(p) => p.serialize(serializer),
+            RequestParams::MultiPayOffer(p) => p.serialize(serializer),
         }
     }
 }
@@ -513,6 +527,24 @@ pub struct LookupOfferRequest {
     pub offer: String,
 }
 
+/// Pay Offer Request
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PayOfferRequest {
+    /// Encoded bolt12 Offer
+    pub offer: String,
+    /// Amount in millisatoshis
+    pub amount: Option<u64>,
+    /// Payer note to be included in the bolt12 invoice
+    pub payer_note: Option<String>,
+}
+
+/// Multi Pay Offer Request
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MultiPayOfferRequest {
+    /// Requested offers
+    pub offers: Vec<PayOfferRequest>,
+}
+
 /// NIP47 Request
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Request {
@@ -658,6 +690,14 @@ impl Request {
             Method::LookupOffer => {
                 let params: LookupOfferRequest = serde_json::from_value(template.params)?;
                 RequestParams::LookupOffer(params)
+            }
+            Method::PayOffer => {
+                let params: PayOfferRequest = serde_json::from_value(template.params)?;
+                RequestParams::PayOffer(params)
+            }
+            Method::MultiPayOffer => {
+                let params: MultiPayOfferRequest = serde_json::from_value(template.params)?;
+                RequestParams::MultiPayOffer(params)
             }
         };
 
@@ -939,6 +979,13 @@ pub struct LookupOfferResponse {
     pub metadata: Option<Value>,
 }
 
+/// Pay Offer Response
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PayOfferResponse {
+    pub preimage: String,
+    pub fees_paid: Option<u64>,
+}
+
 /// NIP47 Response Result
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponseResult {
@@ -970,6 +1017,10 @@ pub enum ResponseResult {
     MakeOffer(MakeOfferResponse),
     /// Lookup Offer
     LookupOffer(LookupOfferResponse),
+    /// Pay Offer
+    PayOffer(PayOfferResponse),
+    /// Multiple Pay Offer
+    MultiPayOffer(PayOfferResponse),
 }
 
 impl Serialize for ResponseResult {
@@ -996,6 +1047,8 @@ impl Serialize for ResponseResult {
             ResponseResult::SettleHoldInvoice(p) => p.serialize(serializer),
             ResponseResult::MakeOffer(p) => p.serialize(serializer),
             ResponseResult::LookupOffer(p) => p.serialize(serializer),
+            ResponseResult::PayOffer(p) => p.serialize(serializer),
+            ResponseResult::MultiPayOffer(p) => p.serialize(serializer),
         }
     }
 }
@@ -1100,6 +1153,14 @@ impl Response {
                 Method::LookupOffer => {
                     let result: LookupOfferResponse = serde_json::from_value(result)?;
                     ResponseResult::LookupOffer(result)
+                }
+                Method::PayOffer => {
+                    let result: PayOfferResponse = serde_json::from_value(result)?;
+                    ResponseResult::PayOffer(result)
+                }
+                Method::MultiPayOffer => {
+                    let result: PayOfferResponse = serde_json::from_value(result)?;
+                    ResponseResult::MultiPayOffer(result)
                 }
             };
 
