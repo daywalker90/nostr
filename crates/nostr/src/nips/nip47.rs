@@ -1025,7 +1025,8 @@ pub struct LookupOfferResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issuer: Option<String>,
     /// Offer creation time
-    pub created_at: Timestamp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<Timestamp>,
     /// Offer expiry
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<Timestamp>,
