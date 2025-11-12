@@ -32,15 +32,11 @@ pub use crate::nips::nip01::{self, *};
 pub use crate::nips::nip02::{self, *};
 #[cfg(feature = "nip04")]
 pub use crate::nips::nip04;
-#[cfg(all(feature = "std", feature = "nip05"))]
 pub use crate::nips::nip05::{self, *};
 #[cfg(feature = "nip06")]
 pub use crate::nips::nip06::{self, *};
-#[cfg(all(feature = "nip07", target_arch = "wasm32"))]
-pub use crate::nips::nip07::{self, *};
 pub use crate::nips::nip09::{self, *};
 pub use crate::nips::nip10::{self, *};
-#[cfg(all(feature = "std", feature = "nip11"))]
 pub use crate::nips::nip11::{self, *};
 pub use crate::nips::nip13::{self, *};
 pub use crate::nips::nip15::{self, *};
@@ -48,7 +44,7 @@ pub use crate::nips::nip17::{self, *};
 pub use crate::nips::nip19::{self, *};
 pub use crate::nips::nip21::{self, *};
 pub use crate::nips::nip22::{self, *};
-pub use crate::nips::nip26::{self, *};
+pub use crate::nips::nip25::{self, *};
 pub use crate::nips::nip34::{self, *};
 pub use crate::nips::nip35::{self, *};
 pub use crate::nips::nip38::{self, *};
@@ -71,6 +67,8 @@ pub use crate::nips::nip57::{self, *};
 pub use crate::nips::nip58;
 #[cfg(feature = "nip59")]
 pub use crate::nips::nip59::{self, *};
+#[cfg(feature = "nip60")]
+pub use crate::nips::nip60::{self, *};
 pub use crate::nips::nip62::{self, *};
 pub use crate::nips::nip65::{self, *};
 pub use crate::nips::nip73::{self, *};
@@ -81,6 +79,7 @@ pub use crate::nips::nip94::{self, *};
 pub use crate::nips::nip96::{self, *};
 #[cfg(feature = "nip98")]
 pub use crate::nips::nip98::{self, *};
+pub use crate::nips::nipb0::{self, *};
 pub use crate::nips::nipc0::{self, *};
 pub use crate::parser::{self, *};
 pub use crate::signer::{self, *};

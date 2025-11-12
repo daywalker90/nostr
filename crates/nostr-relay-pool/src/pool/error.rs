@@ -33,8 +33,6 @@ pub enum Error {
     NoRelays,
     /// No relays specified
     NoRelaysSpecified,
-    /// Negentropy reconciliation failed
-    NegentropyReconciliationFailed,
     /// Relay not found
     RelayNotFound,
     /// Relay Pool is shutdown
@@ -46,17 +44,16 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SharedState(e) => write!(f, "{e}"),
-            Self::RelayUrl(e) => write!(f, "{e}"),
-            Self::Relay(e) => write!(f, "{e}"),
-            Self::Database(e) => write!(f, "{e}"),
-            Self::Handler(e) => write!(f, "{e}"),
-            Self::TooManyRelays { limit } => write!(f, "too many relays (limit: {limit})"),
-            Self::NoRelays => write!(f, "no relays"),
-            Self::NoRelaysSpecified => write!(f, "no relays specified"),
-            Self::NegentropyReconciliationFailed => write!(f, "negentropy reconciliation failed"),
-            Self::RelayNotFound => write!(f, "relay not found"),
-            Self::Shutdown => write!(f, "relay pool is shutdown"),
+            Self::SharedState(e) => e.fmt(f),
+            Self::RelayUrl(e) => e.fmt(f),
+            Self::Relay(e) => e.fmt(f),
+            Self::Database(e) => e.fmt(f),
+            Self::Handler(e) => e.fmt(f),
+            Self::TooManyRelays { .. } => f.write_str("too many relays"),
+            Self::NoRelays => f.write_str("no relays"),
+            Self::NoRelaysSpecified => f.write_str("no relays specified"),
+            Self::RelayNotFound => f.write_str("relay not found"),
+            Self::Shutdown => f.write_str("relay pool is shutdown"),
         }
     }
 }

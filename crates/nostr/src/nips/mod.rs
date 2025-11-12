@@ -10,15 +10,11 @@ pub mod nip01;
 pub mod nip02;
 #[cfg(feature = "nip04")]
 pub mod nip04;
-#[cfg(all(feature = "std", feature = "nip05"))]
 pub mod nip05;
 #[cfg(feature = "nip06")]
 pub mod nip06;
-#[cfg(all(feature = "nip07", target_arch = "wasm32"))]
-pub mod nip07;
 pub mod nip09;
 pub mod nip10;
-#[cfg(all(feature = "std", feature = "nip11"))]
 pub mod nip11;
 pub mod nip13;
 pub mod nip15;
@@ -26,7 +22,7 @@ pub mod nip17;
 pub mod nip19;
 pub mod nip21;
 pub mod nip22;
-pub mod nip26;
+pub mod nip25;
 pub mod nip34;
 pub mod nip35;
 pub mod nip38;
@@ -49,6 +45,8 @@ pub mod nip57;
 pub mod nip58;
 #[cfg(feature = "nip59")]
 pub mod nip59;
+#[cfg(feature = "nip60")]
+pub mod nip60;
 pub mod nip62;
 pub mod nip65;
 pub mod nip73;
@@ -59,4 +57,5 @@ pub mod nip94;
 pub mod nip96;
 #[cfg(feature = "nip98")]
 pub mod nip98;
+pub mod nipb0;
 pub mod nipc0;

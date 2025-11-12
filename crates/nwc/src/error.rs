@@ -20,6 +20,8 @@ pub enum Error {
     PrematureExit,
     /// Request timeout
     Timeout,
+    /// Handler error
+    Handler(String),
 }
 
 impl std::error::Error for Error {}
@@ -27,10 +29,11 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NIP47(e) => write!(f, "{e}"),
-            Self::Pool(e) => write!(f, "{e}"),
-            Self::PrematureExit => write!(f, "premature exit"),
-            Self::Timeout => write!(f, "timeout"),
+            Self::NIP47(e) => e.fmt(f),
+            Self::Pool(e) => e.fmt(f),
+            Self::PrematureExit => f.write_str("premature exit"),
+            Self::Timeout => f.write_str("timeout"),
+            Self::Handler(e) => f.write_str(e),
         }
     }
 }

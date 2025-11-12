@@ -9,7 +9,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
-use core::str::FromStr;
 
 use bip39::Mnemonic;
 use secp256k1::{Secp256k1, Signing};
@@ -39,8 +38,8 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BIP32(e) => write!(f, "BIP32: {e}"),
-            Self::BIP39(e) => write!(f, "BIP39: {e}"),
+            Self::BIP32(e) => e.fmt(f),
+            Self::BIP39(e) => e.fmt(f),
         }
     }
 }
@@ -143,8 +142,8 @@ impl FromMnemonic for Keys {
         C: Signing,
         S: AsRef<str>,
     {
-        // Parse menmonic
-        let mnemonic: Mnemonic = Mnemonic::from_str(mnemonic.as_ref())?;
+        // Parse mnemonic
+        let mnemonic: Mnemonic = Mnemonic::parse_normalized(mnemonic.as_ref())?;
 
         // Convert mnemonic to seed
         let seed: [u8; 64] = mnemonic
@@ -178,6 +177,8 @@ impl FromMnemonic for Keys {
 
 #[cfg(test)]
 mod tests {
+    use core::str::FromStr;
+
     use super::*;
 
     #[test]

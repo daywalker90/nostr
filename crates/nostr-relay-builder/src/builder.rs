@@ -35,7 +35,7 @@ impl Default for RateLimit {
 }
 
 /// Relay builder tor hidden service options
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg(feature = "tor")]
 pub struct RelayBuilderHiddenService {
     /// Nickname (local identifier) for a Tor hidden service
@@ -127,6 +127,8 @@ pub trait QueryPolicy: fmt::Debug + Send + Sync {
 pub struct RelayTestOptions {
     /// Simulate unresponsive connection
     pub unresponsive_connection: Option<Duration>,
+    /// Send random events to the clients
+    pub send_random_events: bool,
 }
 
 /// NIP42 mode
@@ -165,7 +167,7 @@ pub struct RelayBuilderNip42 {
 }
 
 /// Relay builder
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RelayBuilder {
     /// IP address
     pub(crate) addr: Option<IpAddr>,
@@ -184,6 +186,15 @@ pub struct RelayBuilder {
     pub(crate) tor: Option<RelayBuilderHiddenService>,
     /// Max connections allowed
     pub(crate) max_connections: Option<usize>,
+    /// Max subscription ID length
+    pub(crate) max_subid_length: usize,
+    /// Max filter's limit
+    pub(crate) max_filter_limit: Option<usize>,
+    /// Default filter's limit if there is no limit
+    pub(crate) default_filter_limit: usize,
+    /// Enables NIP-42 authentication for kind 1059 (GiftWrap), ensuring the
+    /// authenticated pubkey is the only "p" tag
+    pub(crate) auth_dm: bool,
     /// Min POW difficulty
     pub(crate) min_pow: Option<u8>,
     /// Write policy plugins
@@ -209,6 +220,10 @@ impl Default for RelayBuilder {
             #[cfg(feature = "tor")]
             tor: None,
             max_connections: None,
+            max_subid_length: 250,
+            max_filter_limit: None,
+            default_filter_limit: 500,
+            auth_dm: false,
             min_pow: None,
             write_plugins: Vec::new(),
             query_plugins: Vec::new(),
@@ -278,10 +293,44 @@ impl RelayBuilder {
         self
     }
 
-    /// Set min POW difficulty
+    /// Sets the maximum subscription ID length. Defaults 250.
+    #[inline]
+    pub fn max_subid_length(mut self, max: usize) -> Self {
+        self.max_subid_length = max;
+        self
+    }
+
+    /// Sets the maximum limit for the filter. If the filter's limit exceeds
+    /// this value, it will fallback to this number.
+    #[inline]
+    pub fn max_filter_limit(mut self, max: usize) -> Self {
+        self.max_filter_limit = Some(max);
+        self
+    }
+
+    /// Sets the default filter limit when no limit is specified. Defaults 500.
+    #[inline]
+    pub fn default_filter_limit(mut self, limit: usize) -> Self {
+        self.default_filter_limit = limit;
+        self
+    }
+
+    /// If enabled, NIP-42 will be used for DMs, returning GiftWrap events for
+    /// the mentioned public key only.
+    #[inline]
+    pub fn auth_dm(mut self, enable: bool) -> Self {
+        self.auth_dm = enable;
+        self
+    }
+
+    /// Sets the minimum Proof of Work difficulty.
+    ///
+    /// Only values `> 0` are accepted!
     #[inline]
     pub fn min_pow(mut self, difficulty: u8) -> Self {
-        self.min_pow = Some(difficulty);
+        if difficulty > 0 {
+            self.min_pow = Some(difficulty);
+        }
         self
     }
 

@@ -34,8 +34,8 @@ impl std::error::Error for SharedStateError {}
 impl fmt::Display for SharedStateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SignerNotConfigured => write!(f, "signer not configured"),
-            Self::MutexPoisoned => write!(f, "mutex poisoned"),
+            Self::SignerNotConfigured => f.write_str("signer not configured"),
+            Self::MutexPoisoned => f.write_str("mutex poisoned"),
         }
     }
 }
@@ -101,17 +101,6 @@ impl SharedState {
         self.nip42_auto_authentication
             .store(enable, Ordering::SeqCst);
     }
-
-    /// Minimum POW difficulty for received events
-    ///
-    /// All received events must have a difficulty equal or greater than the set one.
-    ///
-    /// <https://github.com/nostr-protocol/nips/blob/master/42.md>
-    #[deprecated(
-        since = "0.40.0",
-        note = "This no longer works, please use `AdmitPolicy` instead."
-    )]
-    pub fn set_pow(&self, _difficulty: u8) {}
 
     /// Get database
     #[inline]

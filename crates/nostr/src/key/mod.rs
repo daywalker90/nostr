@@ -23,26 +23,23 @@ use secp256k1::{self, Keypair, Message, Secp256k1, Signing, XOnlyPublicKey};
 
 pub mod public_key;
 pub mod secret_key;
-#[cfg(feature = "std")]
-pub mod vanity;
 
 pub use self::public_key::PublicKey;
 pub use self::secret_key::SecretKey;
 #[cfg(feature = "std")]
 use crate::signer::{NostrSigner, SignerBackend, SignerError};
-use crate::util::hex;
 #[cfg(feature = "std")]
 use crate::util::BoxedFuture;
 #[cfg(feature = "std")]
 use crate::{Event, UnsignedEvent, SECP256K1};
 
 /// [`Keys`] error
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     /// Secp256k1 error
     Secp256k1(secp256k1::Error),
     /// Hex decode error
-    Hex(hex::Error),
+    Hex(hex::FromHexError),
     /// Invalid secret key
     InvalidSecretKey,
     /// Invalid public key
@@ -55,10 +52,10 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Secp256k1(e) => write!(f, "{e}"),
-            Self::Hex(e) => write!(f, "{e}"),
-            Self::InvalidSecretKey => write!(f, "Invalid secret key"),
-            Self::InvalidPublicKey => write!(f, "Invalid public key"),
+            Self::Secp256k1(e) => e.fmt(f),
+            Self::Hex(e) => e.fmt(f),
+            Self::InvalidSecretKey => f.write_str("Invalid secret key"),
+            Self::InvalidPublicKey => f.write_str("Invalid public key"),
         }
     }
 }
@@ -69,8 +66,8 @@ impl From<secp256k1::Error> for Error {
     }
 }
 
-impl From<hex::Error> for Error {
-    fn from(e: hex::Error) -> Self {
+impl From<hex::FromHexError> for Error {
+    fn from(e: hex::FromHexError) -> Self {
         Self::Hex(e)
     }
 }

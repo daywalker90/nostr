@@ -9,13 +9,15 @@ use std::sync::Arc;
 use nostr::signer::{IntoNostrSigner, NostrSigner};
 use nostr_database::memory::MemoryDatabase;
 use nostr_database::{IntoNostrDatabase, NostrDatabase};
+use nostr_gossip::{IntoNostrGossip, NostrGossip};
 use nostr_relay_pool::monitor::Monitor;
 use nostr_relay_pool::policy::AdmitPolicy;
 use nostr_relay_pool::transport::websocket::{
     DefaultWebsocketTransport, IntoWebSocketTransport, WebSocketTransport,
 };
 
-use crate::{Client, Options};
+use crate::client::options::ClientOptions;
+use crate::client::Client;
 
 /// Client builder
 #[derive(Debug, Clone)]
@@ -28,10 +30,12 @@ pub struct ClientBuilder {
     pub admit_policy: Option<Arc<dyn AdmitPolicy>>,
     /// Database
     pub database: Arc<dyn NostrDatabase>,
+    /// Gossip
+    pub gossip: Option<Arc<dyn NostrGossip>>,
     /// Relay monitor
     pub monitor: Option<Monitor>,
     /// Client options
-    pub opts: Options,
+    pub opts: ClientOptions,
 }
 
 impl Default for ClientBuilder {
@@ -41,8 +45,9 @@ impl Default for ClientBuilder {
             websocket_transport: Arc::new(DefaultWebsocketTransport),
             admit_policy: None,
             database: Arc::new(MemoryDatabase::default()),
+            gossip: None,
             monitor: None,
-            opts: Options::default(),
+            opts: ClientOptions::default(),
         }
     }
 }
@@ -105,6 +110,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Set a gossip database
+    #[inline]
+    pub fn gossip<T>(mut self, gossip: T) -> Self
+    where
+        T: IntoNostrGossip,
+    {
+        self.gossip = Some(gossip.into_nostr_gossip());
+        self
+    }
+
     /// Set monitor
     #[inline]
     pub fn monitor(mut self, monitor: Monitor) -> Self {
@@ -114,7 +129,7 @@ impl ClientBuilder {
 
     /// Set opts
     #[inline]
-    pub fn opts(mut self, opts: Options) -> Self {
+    pub fn opts(mut self, opts: ClientOptions) -> Self {
         self.opts = opts;
         self
     }

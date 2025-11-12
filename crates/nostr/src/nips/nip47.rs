@@ -44,6 +44,8 @@ pub enum Error {
     },
     /// Unexpected result
     UnexpectedResult,
+    /// Unknown method
+    UnknownMethod,
     /// Invalid URI
     InvalidURI,
 }
@@ -54,17 +56,18 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Json(e) => write!(f, "{e}"),
-            Self::NIP04(e) => write!(f, "{e}"),
+            Self::Json(e) => e.fmt(f),
+            Self::NIP04(e) => e.fmt(f),
             #[cfg(feature = "std")]
-            Self::EventBuilder(e) => write!(f, "{e}"),
-            Self::ErrorCode(e) => write!(f, "{e}"),
+            Self::EventBuilder(e) => e.fmt(f),
+            Self::ErrorCode(e) => e.fmt(f),
             Self::CantDeserializeResponse { response, error } => write!(
                 f,
                 "Can't deserialize response: response={response}, error={error}"
             ),
-            Self::UnexpectedResult => write!(f, "Unexpected result"),
-            Self::InvalidURI => write!(f, "Invalid URI"),
+            Self::UnexpectedResult => f.write_str("Unexpected result"),
+            Self::UnknownMethod => f.write_str("Unknown method"),
+            Self::InvalidURI => f.write_str("Invalid URI"),
         }
     }
 }
@@ -123,41 +126,6 @@ pub enum ErrorCode {
     Other,
 }
 
-impl fmt::Display for Method {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Method::PayInvoice => write!(f, "pay_invoice"),
-            Method::MultiPayInvoice => write!(f, "multi_pay_invoice"),
-            Method::PayKeysend => write!(f, "pay_keysend"),
-            Method::MultiPayKeysend => write!(f, "multi_pay_keysend"),
-            Method::MakeInvoice => write!(f, "make_invoice"),
-            Method::LookupInvoice => write!(f, "lookup_invoice"),
-            Method::ListTransactions => write!(f, "list_transactions"),
-            Method::GetBalance => write!(f, "get_balance"),
-            Method::GetInfo => write!(f, "get_info"),
-        }
-    }
-}
-
-impl FromStr for Method {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "pay_invoice" => Ok(Method::PayInvoice),
-            "multi_pay_invoice" => Ok(Method::MultiPayInvoice),
-            "pay_keysend" => Ok(Method::PayKeysend),
-            "multi_pay_keysend" => Ok(Method::MultiPayKeysend),
-            "make_invoice" => Ok(Method::MakeInvoice),
-            "lookup_invoice" => Ok(Method::LookupInvoice),
-            "list_transactions" => Ok(Method::ListTransactions),
-            "get_balance" => Ok(Method::GetBalance),
-            "get_info" => Ok(Method::GetInfo),
-            _ => Err(Error::InvalidURI),
-        }
-    }
-}
-
 /// NIP47 Error message
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NIP47Error {
@@ -174,35 +142,115 @@ impl fmt::Display for NIP47Error {
 }
 
 /// Method
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Method {
     /// Pay Invoice
-    #[serde(rename = "pay_invoice")]
     PayInvoice,
     /// Multi Pay Invoice
-    #[serde(rename = "multi_pay_invoice")]
     MultiPayInvoice,
     /// Pay Keysend
-    #[serde(rename = "pay_keysend")]
     PayKeysend,
     /// Multi Pay Keysend
-    #[serde(rename = "multi_pay_keysend")]
     MultiPayKeysend,
     /// Make Invoice
-    #[serde(rename = "make_invoice")]
     MakeInvoice,
     /// Lookup Invoice
-    #[serde(rename = "lookup_invoice")]
     LookupInvoice,
     /// List transactions
-    #[serde(rename = "list_transactions")]
     ListTransactions,
     /// Get Balance
-    #[serde(rename = "get_balance")]
     GetBalance,
     /// Get Info
-    #[serde(rename = "get_info")]
     GetInfo,
+    /// Make Hold Invoice
+    MakeHoldInvoice,
+    /// Cancel Hold Invoice
+    CancelHoldInvoice,
+    /// Settle Hold Invoice
+    SettleHoldInvoice,
+    /// Make a bolt12 offer
+    MakeOffer,
+    /// Pay a bolt12 offer
+    PayOffer,
+    /// Multo pay bolt12 offers
+    MultiPayOffer,
+    /// Decode an offer
+    GetOfferInfo,
+}
+
+impl fmt::Display for Method {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl Method {
+    /// Serialize as `&str`
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::PayInvoice => "pay_invoice",
+            Self::MultiPayInvoice => "multi_pay_invoice",
+            Self::PayKeysend => "pay_keysend",
+            Self::MultiPayKeysend => "multi_pay_keysend",
+            Self::MakeInvoice => "make_invoice",
+            Self::LookupInvoice => "lookup_invoice",
+            Self::ListTransactions => "list_transactions",
+            Self::GetBalance => "get_balance",
+            Self::GetInfo => "get_info",
+            Self::MakeHoldInvoice => "make_hold_invoice",
+            Self::CancelHoldInvoice => "cancel_hold_invoice",
+            Self::SettleHoldInvoice => "settle_hold_invoice",
+            Self::MakeOffer => "make_offer",
+            Self::PayOffer => "pay_offer",
+            Self::MultiPayOffer => "multi_pay_offer",
+            Self::GetOfferInfo => "get_offer_info",
+        }
+    }
+}
+
+impl FromStr for Method {
+    type Err = Error;
+
+    fn from_str(method: &str) -> Result<Self, Self::Err> {
+        match method {
+            "pay_invoice" => Ok(Self::PayInvoice),
+            "multi_pay_invoice" => Ok(Self::MultiPayInvoice),
+            "pay_keysend" => Ok(Self::PayKeysend),
+            "multi_pay_keysend" => Ok(Self::MultiPayKeysend),
+            "make_invoice" => Ok(Self::MakeInvoice),
+            "lookup_invoice" => Ok(Self::LookupInvoice),
+            "list_transactions" => Ok(Self::ListTransactions),
+            "get_balance" => Ok(Self::GetBalance),
+            "get_info" => Ok(Self::GetInfo),
+            "make_hold_invoice" => Ok(Self::MakeHoldInvoice),
+            "cancel_hold_invoice" => Ok(Self::CancelHoldInvoice),
+            "settle_hold_invoice" => Ok(Self::SettleHoldInvoice),
+            "make_offer" => Ok(Self::MakeOffer),
+            "pay_offer" => Ok(Self::PayOffer),
+            "multi_pay_offer" => Ok(Self::MultiPayOffer),
+            "get_offer_info" => Ok(Self::GetOfferInfo),
+            _ => Err(Error::UnknownMethod),
+        }
+    }
+}
+
+impl Serialize for Method {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Method {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let method: String = Deserialize::deserialize(deserializer)?;
+        Self::from_str(&method).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Nostr Wallet Connect Request
@@ -226,6 +274,20 @@ pub enum RequestParams {
     GetBalance,
     /// Get Info
     GetInfo,
+    /// Make Hold Invoice
+    MakeHoldInvoice(MakeHoldInvoiceRequest),
+    /// Cancel Hold Invoice
+    CancelHoldInvoice(CancelHoldInvoiceRequest),
+    /// Settle Hold Invoice
+    SettleHoldInvoice(SettleHoldInvoiceRequest),
+    /// Make Offer
+    MakeOffer(MakeOfferRequest),
+    /// Pay Offer
+    PayOffer(PayOfferRequest),
+    /// Multiple Pay Offer
+    MultiPayOffer(MultiPayOfferRequest),
+    /// Decode an offer
+    GetOfferInfo(GetOfferInfoRequest),
 }
 
 impl Serialize for RequestParams {
@@ -249,6 +311,13 @@ impl Serialize for RequestParams {
                 let map = serializer.serialize_map(None)?;
                 map.end()
             }
+            RequestParams::MakeHoldInvoice(p) => p.serialize(serializer),
+            RequestParams::CancelHoldInvoice(p) => p.serialize(serializer),
+            RequestParams::SettleHoldInvoice(p) => p.serialize(serializer),
+            RequestParams::MakeOffer(p) => p.serialize(serializer),
+            RequestParams::PayOffer(p) => p.serialize(serializer),
+            RequestParams::MultiPayOffer(p) => p.serialize(serializer),
+            RequestParams::GetOfferInfo(p) => p.serialize(serializer),
         }
     }
 }
@@ -330,10 +399,13 @@ pub struct MakeInvoiceRequest {
     /// Amount in millisatoshis
     pub amount: u64,
     /// Invoice description
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Invoice description hash
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description_hash: Option<String>,
     /// Invoice expiry in seconds
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expiry: Option<u64>,
 }
 
@@ -341,8 +413,10 @@ pub struct MakeInvoiceRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LookupInvoiceRequest {
     /// Payment hash of invoice
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub payment_hash: Option<String>,
     /// Bolt11 invoice
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub invoice: Option<String>,
 }
 
@@ -355,6 +429,23 @@ pub enum TransactionType {
     /// Outgoing payments
     #[serde(rename = "outgoing")]
     Outgoing,
+}
+
+/// Transaction State
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum TransactionState {
+    /// Pending
+    #[serde(rename = "pending")]
+    Pending,
+    /// Settled
+    #[serde(rename = "settled")]
+    Settled,
+    /// Expired (for invoices)
+    #[serde(rename = "expired")]
+    Expired,
+    /// Failed (for payments)
+    #[serde(rename = "failed")]
+    Failed,
 }
 
 /// List Transactions Request
@@ -381,6 +472,96 @@ pub struct ListTransactionsRequest {
     pub transaction_type: Option<TransactionType>,
 }
 
+/// Make Hold Invoice Request
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MakeHoldInvoiceRequest {
+    /// Amount in millisatoshis
+    pub amount: u64,
+    /// Invoice description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Invoice description hash
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description_hash: Option<String>,
+    /// Invoice expiry in seconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiry: Option<u64>,
+    /// payment_hash
+    pub payment_hash: String,
+    /// The minimum CLTV delta to use for the final hop
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cltv_expiry_delta: Option<u32>,
+}
+
+/// Cancel Hold Invoice Request
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CancelHoldInvoiceRequest {
+    /// payment_hash
+    pub payment_hash: String,
+}
+
+/// Settle Hold Invoice Request
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SettleHoldInvoiceRequest {
+    /// preimage
+    pub preimage: String,
+}
+
+/// Make Offer Request
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MakeOfferRequest {
+    /// ISO 4217 code of the currency (3 characters), (missing means msat)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    /// Number of decimals to apply to the amount, for currency different than msat
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency_minor_unit: Option<u64>,
+    /// Amount in millisatoshis
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<u64>,
+    /// Invoice description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Offer Issuer
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// Absolute expiry time of the offer
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub absolute_expiry: Option<u64>,
+    /// Only allow the offer to be used once, default false
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub single_use: Option<bool>,
+}
+
+/// Pay Offer Request
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PayOfferRequest {
+    /// Optional id
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Encoded bolt12 Offer
+    pub offer: String,
+    /// Amount in millisatoshis
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<u64>,
+    /// Payer note to be included in the bolt12 invoice
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payer_note: Option<String>,
+}
+
+/// Multi Pay Offer Request
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MultiPayOfferRequest {
+    /// Requested offers
+    pub offers: Vec<PayOfferRequest>,
+}
+
+/// Decode an offer
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GetOfferInfoRequest {
+    /// Encoded bolt12 Offer
+    pub offer: String,
+}
 /// NIP47 Request
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Request {
@@ -507,6 +688,34 @@ impl Request {
             }
             Method::GetBalance => RequestParams::GetBalance,
             Method::GetInfo => RequestParams::GetInfo,
+            Method::MakeHoldInvoice => {
+                let params: MakeHoldInvoiceRequest = serde_json::from_value(template.params)?;
+                RequestParams::MakeHoldInvoice(params)
+            }
+            Method::SettleHoldInvoice => {
+                let params: SettleHoldInvoiceRequest = serde_json::from_value(template.params)?;
+                RequestParams::SettleHoldInvoice(params)
+            }
+            Method::CancelHoldInvoice => {
+                let params: CancelHoldInvoiceRequest = serde_json::from_value(template.params)?;
+                RequestParams::CancelHoldInvoice(params)
+            }
+            Method::MakeOffer => {
+                let params: MakeOfferRequest = serde_json::from_value(template.params)?;
+                RequestParams::MakeOffer(params)
+            }
+            Method::PayOffer => {
+                let params: PayOfferRequest = serde_json::from_value(template.params)?;
+                RequestParams::PayOffer(params)
+            }
+            Method::MultiPayOffer => {
+                let params: MultiPayOfferRequest = serde_json::from_value(template.params)?;
+                RequestParams::MultiPayOffer(params)
+            }
+            Method::GetOfferInfo => {
+                let params: GetOfferInfoRequest = serde_json::from_value(template.params)?;
+                RequestParams::GetOfferInfo(params)
+            }
         };
 
         Ok(Self {
@@ -545,6 +754,9 @@ impl<'de> Deserialize<'de> for Request {
 pub struct PayInvoiceResponse {
     /// Response preimage
     pub preimage: String,
+    /// Fees paid
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fees_paid: Option<u64>,
 }
 
 /// NIP47 Response Result
@@ -552,15 +764,48 @@ pub struct PayInvoiceResponse {
 pub struct PayKeysendResponse {
     /// Response preimage
     pub preimage: String,
+    /// Fees paid
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fees_paid: Option<u64>,
 }
 
 /// Make Invoice Response
+//
+// NOTE: don't add `type`, `state` or `fees_paid`, as they don't make sense here.
+//
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MakeInvoiceResponse {
     /// Bolt 11 invoice
     pub invoice: String,
     /// Invoice's payment hash
-    pub payment_hash: String,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub payment_hash: Option<String>,
+    /// Invoice's description
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub description: Option<String>,
+    /// Invoice's description hash
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub description_hash: Option<String>,
+    /// Payment preimage
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub preimage: Option<String>,
+    /// Amount in msats.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<u64>,
+    /// Creation timestamp in seconds since epoch
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<Timestamp>,
+    /// Expiration timestamp in seconds since epoch
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
 }
 
 /// Lookup Invoice Response
@@ -570,20 +815,43 @@ pub struct LookupInvoiceResponse {
     #[serde(rename = "type")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transaction_type: Option<TransactionType>,
-    /// Bolt11 invoice
+    /// Transaction state
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<TransactionState>,
+    /// Bolt11 invoice
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
     pub invoice: Option<String>,
     /// Invoice's description
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
     pub description: Option<String>,
     /// Invoice's description hash
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
     pub description_hash: Option<String>,
-    /// Payment preimage
+    /// offer's issuer for a bolt12 transaction
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub offer_issuer: Option<String>,
+    /// note from payer for a bolt12 transaction
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub payer_note: Option<String>,
+    /// Payment preimage
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
     pub preimage: Option<String>,
     /// Payment hash
     pub payment_hash: String,
+    /// the id of the offer, for a bolt12 invoice
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub offer_id: Option<String>,
     /// Amount in millisatoshis
     pub amount: u64,
     /// Fees paid in millisatoshis
@@ -614,18 +882,22 @@ pub struct GetInfoResponse {
     /// The alias of the lightning node
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
     pub alias: Option<String>,
     /// The color of the current node in hex code format
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
     pub color: Option<String>,
     /// Lightning Node's public key
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pubkey: Option<secp256k1::PublicKey>,
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub pubkey: Option<String>,
     /// Active network
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
     pub network: Option<String>,
     /// Current block height
     #[serde(default)]
@@ -634,13 +906,115 @@ pub struct GetInfoResponse {
     /// Most Recent Block Hash
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
     pub block_hash: Option<String>,
     /// Available methods for this connection
-    pub methods: Vec<String>,
+    pub methods: Vec<Method>,
     /// List of supported notifications for this connection (optional)
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notifications: Vec<String>,
+}
+
+/// Make Hold Invoice Response
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MakeHoldInvoiceResponse {
+    /// Transaction type
+    #[serde(rename = "type")]
+    pub transaction_type: TransactionType,
+    /// Bolt11 invoice
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub invoice: Option<String>,
+    /// Description
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub description: Option<String>,
+    /// Description hash
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub description_hash: Option<String>,
+    /// Payment hash
+    pub payment_hash: String,
+    /// Amount in millisatoshis
+    pub amount: u64,
+    /// Creation timestamp
+    pub created_at: Timestamp,
+    /// Expiration timestamp
+    pub expires_at: Timestamp,
+    /// Metadata
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
+
+/// Make Offer Response
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MakeOfferResponse {
+    /// Encoded bolt12 offer
+    pub offer: String,
+    /// OFfer description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Offer issuer
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// ISO 4217 code of the currency (3 characters), (missing means msat)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    /// Number of decimals to apply to the amount, for currency different than msat
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency_minor_unit: Option<u64>,
+    /// Offer amount in msats
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<u64>,
+    /// Only allow the offer to be used once, default false
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub single_use: Option<bool>,
+    /// Offer expiry
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
+}
+
+/// Cancel Hold Invoice Response
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CancelHoldInvoiceResponse {}
+
+/// Settle Hold Invoice Response
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SettleHoldInvoiceResponse {}
+
+/// Pay Offer Response
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PayOfferResponse {
+    pub preimage: String,
+    pub fees_paid: Option<u64>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GetOfferInfoResponse {
+    /// Encoded bolt12 offer
+    pub offer: String,
+    /// Offer description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Offer issuer
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// ISO 4217 code of the currency (3 characters), (missing means msat)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    /// Number of decimals to apply to the amount, for currency different than msat
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency_minor_unit: Option<u64>,
+    /// Offer amount in msats
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<u64>,
+    /// Offer expiry
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
 }
 
 /// NIP47 Response Result
@@ -664,6 +1038,20 @@ pub enum ResponseResult {
     GetBalance(GetBalanceResponse),
     /// Get Info
     GetInfo(GetInfoResponse),
+    /// Make Hold Invoice
+    MakeHoldInvoice(MakeHoldInvoiceResponse),
+    /// Cancel Hold Invoice
+    CancelHoldInvoice(CancelHoldInvoiceResponse),
+    /// Settle Hold Invoice
+    SettleHoldInvoice(SettleHoldInvoiceResponse),
+    /// Make Offer
+    MakeOffer(MakeOfferResponse),
+    /// Pay Offer
+    PayOffer(PayOfferResponse),
+    /// Multiple Pay Offer
+    MultiPayOffer(PayOfferResponse),
+    /// Decode an offer
+    GetOfferInfo(GetOfferInfoResponse),
 }
 
 impl Serialize for ResponseResult {
@@ -685,6 +1073,13 @@ impl Serialize for ResponseResult {
             }
             ResponseResult::GetBalance(p) => p.serialize(serializer),
             ResponseResult::GetInfo(p) => p.serialize(serializer),
+            ResponseResult::MakeHoldInvoice(p) => p.serialize(serializer),
+            ResponseResult::CancelHoldInvoice(p) => p.serialize(serializer),
+            ResponseResult::SettleHoldInvoice(p) => p.serialize(serializer),
+            ResponseResult::MakeOffer(p) => p.serialize(serializer),
+            ResponseResult::PayOffer(p) => p.serialize(serializer),
+            ResponseResult::MultiPayOffer(p) => p.serialize(serializer),
+            ResponseResult::GetOfferInfo(p) => p.serialize(serializer),
         }
     }
 }
@@ -695,8 +1090,10 @@ pub struct Response {
     /// Request Method
     pub result_type: Method,
     /// NIP47 Error
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<NIP47Error>,
     /// NIP47 Result
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<ResponseResult>,
 }
 
@@ -767,6 +1164,34 @@ impl Response {
                 Method::GetInfo => {
                     let result: GetInfoResponse = serde_json::from_value(result)?;
                     ResponseResult::GetInfo(result)
+                }
+                Method::MakeHoldInvoice => {
+                    let result: MakeHoldInvoiceResponse = serde_json::from_value(result)?;
+                    ResponseResult::MakeHoldInvoice(result)
+                }
+                Method::CancelHoldInvoice => {
+                    let result: CancelHoldInvoiceResponse = serde_json::from_value(result)?;
+                    ResponseResult::CancelHoldInvoice(result)
+                }
+                Method::SettleHoldInvoice => {
+                    let result: SettleHoldInvoiceResponse = serde_json::from_value(result)?;
+                    ResponseResult::SettleHoldInvoice(result)
+                }
+                Method::MakeOffer => {
+                    let result: MakeOfferResponse = serde_json::from_value(result)?;
+                    ResponseResult::MakeOffer(result)
+                }
+                Method::PayOffer => {
+                    let result: PayOfferResponse = serde_json::from_value(result)?;
+                    ResponseResult::PayOffer(result)
+                }
+                Method::MultiPayOffer => {
+                    let result: PayOfferResponse = serde_json::from_value(result)?;
+                    ResponseResult::MultiPayOffer(result)
+                }
+                Method::GetOfferInfo => {
+                    let result: GetOfferInfoResponse = serde_json::from_value(result)?;
+                    ResponseResult::GetOfferInfo(result)
                 }
             };
 
@@ -1042,6 +1467,9 @@ pub enum NotificationType {
     /// A payment was successfully sent by the wallet
     #[serde(rename = "payment_sent")]
     PaymentSent,
+    /// A hold invoice has enough funds locked
+    #[serde(rename = "hold_invoice_accepted")]
+    HoldInvoiceAccepted,
 }
 
 impl fmt::Display for NotificationType {
@@ -1049,6 +1477,7 @@ impl fmt::Display for NotificationType {
         match self {
             NotificationType::PaymentReceived => write!(f, "payment_received"),
             NotificationType::PaymentSent => write!(f, "payment_sent"),
+            NotificationType::HoldInvoiceAccepted => write!(f, "hold_invoice_accepted"),
         }
     }
 }
@@ -1060,6 +1489,7 @@ impl FromStr for NotificationType {
         match s {
             "payment_received" => Ok(NotificationType::PaymentReceived),
             "payment_sent" => Ok(NotificationType::PaymentSent),
+            "hold_invoice_accepted" => Ok(NotificationType::HoldInvoiceAccepted),
             _ => Err(Error::InvalidURI),
         }
     }
@@ -1105,6 +1535,10 @@ impl Notification {
                 let result: PaymentNotification = serde_json::from_value(result)?;
                 NotificationResult::PaymentSent(result)
             }
+            NotificationType::HoldInvoiceAccepted => {
+                let result: HoldInvoiceAcceptedNotification = serde_json::from_value(result)?;
+                NotificationResult::HoldInvoiceAccepted(result)
+            }
         };
 
         Ok(Self {
@@ -1119,6 +1553,17 @@ impl Notification {
             return Ok(result);
         }
         if let NotificationResult::PaymentSent(result) = self.notification {
+            return Ok(result);
+        }
+
+        Err(Error::UnexpectedResult)
+    }
+
+    /// Convert [Notification] to [HoldInvoiceAcceptedNotification]
+    pub fn to_holdinvoice_accepted_notification(
+        self,
+    ) -> Result<HoldInvoiceAcceptedNotification, Error> {
+        if let NotificationResult::HoldInvoiceAccepted(result) = self.notification {
             return Ok(result);
         }
 
@@ -1147,6 +1592,8 @@ pub enum NotificationResult {
     PaymentReceived(PaymentNotification),
     /// Payment sent
     PaymentSent(PaymentNotification),
+    /// Hold invoice accepted (locked in)
+    HoldInvoiceAccepted(HoldInvoiceAcceptedNotification),
 }
 
 impl Serialize for NotificationResult {
@@ -1157,6 +1604,7 @@ impl Serialize for NotificationResult {
         match self {
             NotificationResult::PaymentReceived(p) => p.serialize(serializer),
             NotificationResult::PaymentSent(p) => p.serialize(serializer),
+            NotificationResult::HoldInvoiceAccepted(p) => p.serialize(serializer),
         }
     }
 }
@@ -1168,18 +1616,37 @@ pub struct PaymentNotification {
     #[serde(rename = "type")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transaction_type: Option<TransactionType>,
+    /// Transaction state
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<TransactionState>,
     /// Bolt11 invoice
     pub invoice: String,
     /// Invoice's description
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
     pub description: Option<String>,
     /// Invoice's description hash
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
     pub description_hash: Option<String>,
+    /// offer's issuer for a bolt12 transaction
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub offer_issuer: Option<String>,
+    /// note from payer for a bolt12 transaction
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub payer_note: Option<String>,
     /// Payment preimage
     pub preimage: String,
     /// Payment hash
     pub payment_hash: String,
+    /// the id of the offer, for a bolt12 invoice
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub offer_id: Option<String>,
     /// Amount in millisatoshis
     pub amount: u64,
     /// Fees paid in millisatoshis
@@ -1194,6 +1661,53 @@ pub struct PaymentNotification {
     /// Optional metadata about the payment
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+}
+
+/// Hold Invoice accepted notification
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HoldInvoiceAcceptedNotification {
+    /// Transaction type
+    #[serde(rename = "type")]
+    pub transaction_type: TransactionType,
+    /// Bolt11 invoice
+    pub invoice: String,
+    /// Description
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub description: Option<String>,
+    /// Description hash
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub description_hash: Option<String>,
+    /// Payment hash
+    pub payment_hash: String,
+    /// Amount in millisatoshis
+    pub amount: u64,
+    /// Creation timestamp
+    pub created_at: Timestamp,
+    /// Expiration timestamp
+    pub expires_at: Timestamp,
+    /// Settled deadline in blockheight
+    pub settle_deadline: u32,
+    /// Optional metadata about the payment
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
+
+fn deserialize_empty_string_as_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: FromStr,
+    T::Err: fmt::Display,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    match opt {
+        Some(s) if s.is_empty() => Ok(None),
+        Some(s) => T::from_str(&s).map(Some).map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -1307,6 +1821,7 @@ mod tests {
             result: Some(ResponseResult::ListTransactions(vec![
                 LookupInvoiceResponse {
                     transaction_type: Some(TransactionType::Incoming),
+                    state: Some(TransactionState::Expired),
                     invoice: Some(String::from("abcd")),
                     description: Some(String::from("string")),
                     amount: 123,
@@ -1318,6 +1833,9 @@ mod tests {
                     metadata: None,
                     settled_at: None,
                     preimage: None,
+                    offer_issuer: None,
+                    payer_note: None,
+                    offer_id: None,
                 },
             ])),
             result_type: Method::ListTransactions,
@@ -1337,6 +1855,7 @@ mod tests {
                 "transactions": [
                     {
                        "type": "incoming",
+                       "state": "expired",
                        "invoice": "abcd",
                        "description": "string",
                        "payment_hash": "",
@@ -1356,6 +1875,7 @@ mod tests {
             Some(ResponseResult::ListTransactions(vec![
                 LookupInvoiceResponse {
                     transaction_type: Some(TransactionType::Incoming),
+                    state: Some(TransactionState::Expired),
                     invoice: Some(String::from("abcd")),
                     description: Some(String::from("string")),
                     amount: 123,
@@ -1366,7 +1886,10 @@ mod tests {
                     payment_hash: String::new(),
                     metadata: None,
                     settled_at: None,
-                    preimage: None
+                    preimage: None,
+                    offer_issuer: None,
+                    payer_note: None,
+                    offer_id: None
                 }
             ]))
         )
@@ -1378,6 +1901,7 @@ mod tests {
             "notification_type": "payment_received",
             "notification": {
                 "type": "incoming",
+                "state": "settled",
                 "invoice": "abcd",
                 "description": "string1",
                 "description_hash": "string2",
@@ -1398,6 +1922,7 @@ mod tests {
         );
         let notification_result = NotificationResult::PaymentReceived(PaymentNotification {
             transaction_type: Some(TransactionType::Incoming),
+            state: Some(TransactionState::Settled),
             invoice: String::from("abcd"),
             description: Some(String::from("string1")),
             description_hash: Some(String::from("string2")),
@@ -1409,6 +1934,9 @@ mod tests {
             expires_at: Some(Timestamp::from_secs(546132287)),
             settled_at: Timestamp::from_secs(843548111),
             metadata: Some(Value::Object(serde_json::Map::new())),
+            offer_issuer: None,
+            payer_note: None,
+            offer_id: None,
         });
         assert_eq!(notification_parsed.notification, notification_result);
 
@@ -1416,5 +1944,35 @@ mod tests {
         let reponse_result_deserialized: Notification =
             serde_json::from_str(&notification_json).unwrap();
         assert_eq!(notification_parsed, reponse_result_deserialized)
+    }
+
+    // Issues:
+    // - https://github.com/rust-nostr/nostr/issues/1078
+    // - https://github.com/getAlby/hub/issues/1746
+    #[test]
+    fn test_parse_get_info_response_with_empty_strings() {
+        let json = r#"{"alias":"","color":"","pubkey":"","network":"","block_height":0,"block_hash":"","methods":["pay_invoice","pay_keysend","multi_pay_invoice","multi_pay_keysend","get_info","get_balance"],"notifications":[],"lud16":""}"#;
+        let response: GetInfoResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            response,
+            GetInfoResponse {
+                alias: None,
+                color: None,
+                pubkey: None,
+                network: None,
+                block_height: Some(0),
+                block_hash: None,
+                methods: vec![
+                    Method::PayInvoice,
+                    Method::PayKeysend,
+                    Method::MultiPayInvoice,
+                    Method::MultiPayKeysend,
+                    Method::GetInfo,
+                    Method::GetBalance,
+                ],
+                notifications: Vec::new()
+            }
+        );
     }
 }

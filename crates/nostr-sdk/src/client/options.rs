@@ -12,20 +12,66 @@ use std::time::Duration;
 
 use nostr_relay_pool::prelude::*;
 
+/// Max number of relays to use for gossip
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GossipRelayLimits {
+    /// Max number of **read** relays per user (default: 3)
+    pub read_relays_per_user: usize,
+    /// Max number of **write** relays per user (default: 3)
+    pub write_relays_per_user: usize,
+    /// Max number of **hint** relays per user (default: 1)
+    pub hint_relays_per_user: usize,
+    /// Max number of **most used** relays per user (default: 1)
+    pub most_used_relays_per_user: usize,
+    /// Max number of NIP-17 relays per user (default: 3)
+    pub nip17_relays: usize,
+}
+
+impl Default for GossipRelayLimits {
+    fn default() -> Self {
+        Self {
+            read_relays_per_user: 3,
+            write_relays_per_user: 3,
+            hint_relays_per_user: 1,
+            most_used_relays_per_user: 1,
+            nip17_relays: 3,
+        }
+    }
+}
+
+/// Gossip options
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GossipOptions {
+    /// Max number of relays to use
+    pub limits: GossipRelayLimits,
+}
+
+impl GossipOptions {
+    /// Set limits
+    #[inline]
+    pub fn limits(mut self, limits: GossipRelayLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+}
+
 /// Options
 #[derive(Debug, Clone, Default)]
-pub struct Options {
+pub struct ClientOptions {
     pub(super) autoconnect: bool,
-    pub(super) gossip: bool,
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) connection: Connection,
     pub(super) relay_limits: RelayLimits,
     pub(super) max_avg_latency: Option<Duration>,
+    pub(super) sleep_when_idle: SleepWhenIdle,
+    pub(super) verify_subscriptions: bool,
+    pub(super) ban_relay_on_mismatch: bool,
+    pub(super) gossip: GossipOptions,
     pub(super) pool: RelayPoolOptions,
 }
 
-impl Options {
-    /// Create new (default) [`Options`]
+impl ClientOptions {
+    /// Create new default options
     #[inline]
     pub fn new() -> Self {
         Self::default()
@@ -40,34 +86,12 @@ impl Options {
         self
     }
 
-    /// Minimum POW difficulty for received events (default: 0)
-    #[deprecated(
-        since = "0.40.0",
-        note = "This no longer works, please use `AdmitPolicy` instead."
-    )]
-    pub fn min_pow(self, _difficulty: u8) -> Self {
-        self
-    }
-
-    /// REQ filters chunk size (default: 10)
-    #[deprecated(since = "0.39.0")]
-    pub fn req_filters_chunk_size(self, _size: u8) -> Self {
-        self
-    }
-
     /// Auto authenticate to relays (default: true)
     ///
     /// <https://github.com/nostr-protocol/nips/blob/master/42.md>
     #[inline]
     pub fn automatic_authentication(mut self, enabled: bool) -> Self {
         self.pool = self.pool.automatic_authentication(enabled);
-        self
-    }
-
-    /// Enable gossip model (default: false)
-    #[inline]
-    pub fn gossip(mut self, enable: bool) -> Self {
-        self.gossip = enable;
         self
     }
 
@@ -95,10 +119,29 @@ impl Options {
         self
     }
 
-    /// Notification channel size (default: [`DEFAULT_NOTIFICATION_CHANNEL_SIZE`])
-    #[deprecated(since = "0.42.0", note = "Use `Options::pool` instead.")]
-    pub fn notification_channel_size(mut self, size: usize) -> Self {
-        self.pool = self.pool.notification_channel_size(size);
+    /// Set sleep when idle config
+    #[inline]
+    pub fn sleep_when_idle(mut self, config: SleepWhenIdle) -> Self {
+        self.sleep_when_idle = config;
+        self
+    }
+
+    /// Verify that received events belong to a subscription and match the filter.
+    pub fn verify_subscriptions(mut self, enable: bool) -> Self {
+        self.verify_subscriptions = enable;
+        self
+    }
+
+    /// If true, ban a relay when it sends an event that doesn't match the subscription filter.
+    pub fn ban_relay_on_mismatch(mut self, ban_relay: bool) -> Self {
+        self.ban_relay_on_mismatch = ban_relay;
+        self
+    }
+
+    /// Set gossip options
+    #[inline]
+    pub fn gossip(mut self, opts: GossipOptions) -> Self {
+        self.gossip = opts;
         self
     }
 
@@ -108,6 +151,21 @@ impl Options {
         self.pool = opts;
         self
     }
+}
+
+/// Put relays to sleep when idle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SleepWhenIdle {
+    /// Disabled
+    #[default]
+    Disabled,
+    /// Enabled for all relays
+    Enabled {
+        /// Idle timeout
+        ///
+        /// After how much time of inactivity put the relay to sleep.
+        timeout: Duration,
+    },
 }
 
 /// Connection target

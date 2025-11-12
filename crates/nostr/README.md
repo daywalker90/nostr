@@ -83,23 +83,26 @@ Check the example in the [embedded/](https://github.com/rust-nostr/nostr/tree/ma
 
 The following crate feature flags are available:
 
-| Feature    | Default | Description                                                                                  |
-|------------|:-------:|----------------------------------------------------------------------------------------------|
-| `std`      |   Yes   | Enable `std` library                                                                         |
-| `alloc`    |   No    | Needed to use this library in `no_std` context                                               |
-| `all-nips` |   No    | Enable all NIPs                                                                              |
-| `nip03`    |   No    | Enable NIP-03: OpenTimestamps Attestations for Events                                        |
-| `nip04`    |   No    | Enable NIP-04: Encrypted Direct Message                                                      |
-| `nip05`    |   No    | Enable NIP-05: Mapping Nostr keys to DNS-based internet identifiers                          |
-| `nip06`    |   No    | Enable NIP-06: Basic key derivation from mnemonic seed phrase                                |
-| `nip07`    |   No    | Enable NIP-07: `window.nostr` capability for web browsers (**available only for `wasm32`!**) |
-| `nip11`    |   No    | Enable NIP-11: Relay Information Document                                                    |
-| `nip44`    |   No    | Enable NIP-44: Encrypted Payloads (Versioned)                                                |
-| `nip46`    |   No    | Enable NIP-46: Nostr Connect                                                                 |
-| `nip47`    |   No    | Enable NIP-47: Nostr Wallet Connect                                                          |
-| `nip49`    |   No    | Enable NIP-49: Private Key Encryption                                                        |
-| `nip57`    |   No    | Enable NIP-57: Zaps                                                                          |
-| `nip59`    |   No    | Enable NIP-59: Gift Wrap                                                                     |
+| Feature            | Default | Description                                                   |
+|--------------------|:-------:|---------------------------------------------------------------|
+| `std`              |   Yes   | Enable `std` library                                          |
+| `alloc`            |   No    | Needed to use this library in `no_std` context                |
+| `pow-multi-thread` |   No    | Enable event POW mining using multi-threads                   |
+| `all-nips`         |   No    | Enable all NIPs                                               |
+| `nip03`            |   No    | Enable NIP-03: OpenTimestamps Attestations for Events         |
+| `nip04`            |   No    | Enable NIP-04: Encrypted Direct Message                       |
+| `nip06`            |   No    | Enable NIP-06: Basic key derivation from mnemonic seed phrase |
+| `nip44`            |   No    | Enable NIP-44: Encrypted Payloads (Versioned)                 |
+| `nip46`            |   No    | Enable NIP-46: Nostr Connect                                  |
+| `nip47`            |   No    | Enable NIP-47: Nostr Wallet Connect                           |
+| `nip49`            |   No    | Enable NIP-49: Private Key Encryption                         |
+| `nip57`            |   No    | Enable NIP-57: Zaps                                           |
+| `nip59`            |   No    | Enable NIP-59: Gift Wrap                                      |
+| `nip60`            |   No    | Enable NIP-60: Cashu Wallets                                  |
+
+## Changelog
+
+All notable changes to this library are documented in the [CHANGELOG.md](CHANGELOG.md).
 
 ## State
 

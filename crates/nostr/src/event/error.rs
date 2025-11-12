@@ -6,17 +6,16 @@ use alloc::string::{String, ToString};
 use core::fmt;
 
 use crate::signer::SignerError;
-use crate::util::hex;
 
 /// Event error
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     /// Error serializing or deserializing JSON data
     Json(String),
     /// Signer error
     Signer(String),
     /// Hex decode error
-    Hex(hex::Error),
+    Hex(hex::FromHexError),
     /// Unknown JSON event key
     UnknownKey(String),
     /// Invalid event ID
@@ -31,12 +30,12 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Json(e) => write!(f, "{e}"),
-            Self::Signer(e) => write!(f, "{e}"),
-            Self::Hex(e) => write!(f, "{e}"),
+            Self::Json(e) => e.fmt(f),
+            Self::Signer(e) => e.fmt(f),
+            Self::Hex(e) => e.fmt(f),
             Self::UnknownKey(key) => write!(f, "Unknown key: {key}"),
-            Self::InvalidId => write!(f, "Invalid event ID"),
-            Self::InvalidSignature => write!(f, "Invalid signature"),
+            Self::InvalidId => f.write_str("Invalid event ID"),
+            Self::InvalidSignature => f.write_str("Invalid signature"),
         }
     }
 }
@@ -53,8 +52,8 @@ impl From<SignerError> for Error {
     }
 }
 
-impl From<hex::Error> for Error {
-    fn from(e: hex::Error) -> Self {
+impl From<hex::FromHexError> for Error {
+    fn from(e: hex::FromHexError) -> Self {
         Self::Hex(e)
     }
 }

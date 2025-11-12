@@ -7,13 +7,10 @@
 //! <https://github.com/nostr-protocol/nips/blob/master/21.md>
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::convert::Infallible;
 use core::fmt;
 
 use super::nip19::{self, FromBech32, Nip19, Nip19Coordinate, Nip19Event, Nip19Profile, ToBech32};
-use crate::nips::nip01::Coordinate;
-use crate::parser::{NostrParser, NostrParserOptions, Token};
 use crate::{EventId, PublicKey};
 
 /// URI scheme
@@ -31,13 +28,13 @@ pub enum UnsupportedVariant {
 impl fmt::Display for UnsupportedVariant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SecretKey => write!(f, "secret key"),
+            Self::SecretKey => f.write_str("secret key"),
         }
     }
 }
 
 /// NIP21 error
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     /// NIP19 error
     NIP19(nip19::Error),
@@ -53,9 +50,9 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NIP19(e) => write!(f, "NIP19: {e}"),
+            Self::NIP19(e) => e.fmt(f),
             Self::UnsupportedVariant(t) => write!(f, "Unsupported variant: {t}"),
-            Self::InvalidURI => write!(f, "Invalid nostr URI"),
+            Self::InvalidURI => f.write_str("Invalid nostr URI"),
         }
     }
 }
@@ -116,7 +113,6 @@ impl ToNostrUri for Nip19Profile {}
 impl FromNostrUri for Nip19Profile {}
 impl ToNostrUri for Nip19Event {}
 impl FromNostrUri for Nip19Event {}
-impl FromNostrUri for Coordinate {}
 impl ToNostrUri for Nip19Coordinate {}
 impl FromNostrUri for Nip19Coordinate {}
 
@@ -198,26 +194,18 @@ impl Nip21 {
     }
 }
 
-/// Extract `nostr:` URIs from a text
-///
-/// The returned vector maintains the same order as their occurrences in the input.
-///
-/// The result **is not deduplicated**, meaning that if a URI appears multiple times in the input,
-/// it will appear the same number of times in the output.
-#[deprecated(since = "0.43.0", note = "Use the NostrParser instead.")]
-pub fn extract_from_text(content: &str) -> Vec<Nip21> {
-    let parser: NostrParser = NostrParser::new();
-    let opts: NostrParserOptions = NostrParserOptions::disable_all().nostr_uris(true);
+impl ToBech32 for Nip21 {
+    type Err = Error;
 
-    let mut list: Vec<Nip21> = Vec::new();
-
-    for token in parser.parse(content).opts(opts) {
-        if let Token::Nostr(uri) = token {
-            list.push(uri);
+    fn to_bech32(&self) -> Result<String, Self::Err> {
+        match self {
+            Self::Pubkey(val) => Ok(val.to_bech32()?),
+            Self::Profile(val) => Ok(val.to_bech32()?),
+            Self::EventId(val) => Ok(val.to_bech32()?),
+            Self::Event(val) => Ok(val.to_bech32()?),
+            Self::Coordinate(val) => Ok(val.to_bech32()?),
         }
     }
-
-    list
 }
 
 #[cfg(test)]

@@ -1,11 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -euo pipefail
+set -exuo pipefail
 
 # MSRV
 msrv="1.70.0"
 
-is_ci=false
 is_msrv=false
 version=""
 
@@ -13,11 +12,6 @@ version=""
 if [[ "$#" -gt 0 && "$1" == "msrv" ]]; then
     is_msrv=true
     version="+$msrv"
-fi
-
-# Check if "ci" is passed as an argument
-if [[ "$#" -gt 0 && "$2" == "ci" ]]; then
-    is_ci=true
 fi
 
 # Check if MSRV
@@ -28,7 +22,6 @@ if [ "$is_msrv" == true ]; then
     rustup target add wasm32-unknown-unknown --toolchain $msrv
 fi
 
-echo "CI: $is_ci"
 echo "MSRV: $is_msrv"
 
 buildargs=(
@@ -36,13 +29,14 @@ buildargs=(
     "-p nostr --features all-nips"                                # std + all-nips
     "-p nostr --no-default-features --features alloc"             # Only alloc feature
     "-p nostr --no-default-features --features alloc,all-nips"    # alloc + all-nips
-    "-p nostr --all-features"                                     # All features
+    "-p nostr-browser-signer --target wasm32-unknown-unknown"
+    "-p nostr-browser-signer-proxy"
+    "-p nostr-blossom"
+    "-p nostr-http-file-storage"
     "-p nostr-database"
+    "-p nostr-gossip"
+    "-p nostr-gossip-memory"
     "-p nostr-lmdb"
-    "-p nostr-mls-storage"
-    "-p nostr-mls-memory-storage"
-    "-p nostr-mls-sqlite-storage"
-    "-p nostr-mls"
     "-p nostr-indexeddb --target wasm32-unknown-unknown"
     "-p nostr-ndb"
     "-p nostr-keyring"
@@ -55,20 +49,14 @@ buildargs=(
     "-p nostr-sdk --features all-nips"                            # Only NIPs features
     "-p nostr-sdk --features tor"                                 # Embedded tor client
     "-p nostr-sdk --all-features"                                 # All features
-    "-p nostr-cli"
 )
 
 skip_msrv=(
     "-p nostr-lmdb"                       # MSRV: 1.72.0
-    "-p nostr-mls-storage"                # MSRV: 1.74.0
-    "-p nostr-mls-memory-storage"         # MSRV: 1.74.0
-    "-p nostr-mls-sqlite-storage"         # MSRV: 1.74.0
-    "-p nostr-mls"                        # MSRV: 1.74.0
     "-p nostr-keyring"                    # MSRV: 1.75.0
     "-p nostr-keyring --features async"   # MSRV: 1.75.0
     "-p nostr-sdk --features tor"         # MSRV: 1.77.0
     "-p nostr-sdk --all-features"         # MSRV: 1.77.0 (since uses lmdb and tor)
-    "-p nostr-cli"                        # MSRV: 1.74.0
 )
 
 for arg in "${buildargs[@]}";
@@ -103,11 +91,6 @@ do
     fi
 
     cargo $version clippy $arg -- -D warnings
-
-    # If CI, clean every time to avoid to go out of space (GitHub Actions issue)
-    if [ "$is_ci" == true ]; then
-        cargo $version clean
-    fi
 
     echo
 done

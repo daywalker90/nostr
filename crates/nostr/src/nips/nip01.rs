@@ -17,18 +17,16 @@ use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::nip19::FromBech32;
-use super::nip21::FromNostrUri;
+use super::nip19::{self, FromBech32, Nip19Coordinate, ToBech32};
+use super::nip21::{FromNostrUri, ToNostrUri};
 use crate::types::Url;
-use crate::{event, key, Filter, JsonUtil, Kind, PublicKey, Tag};
+use crate::{key, Filter, JsonUtil, Kind, PublicKey, Tag};
 
 /// Raw Event error
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     /// Keys error
     Keys(key::Error),
-    /// Event ID error
-    Event(event::Error),
     /// Parse Int error
     ParseInt(ParseIntError),
     /// Invalid coordinate
@@ -41,10 +39,9 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Keys(e) => write!(f, "{e}"),
-            Self::Event(e) => write!(f, "{e}"),
-            Self::ParseInt(e) => write!(f, "{e}"),
-            Self::InvalidCoordinate => write!(f, "Invalid coordinate"),
+            Self::Keys(e) => e.fmt(f),
+            Self::ParseInt(e) => e.fmt(f),
+            Self::InvalidCoordinate => f.write_str("Invalid coordinate"),
         }
     }
 }
@@ -52,12 +49,6 @@ impl fmt::Display for Error {
 impl From<key::Error> for Error {
     fn from(e: key::Error) -> Self {
         Self::Keys(e)
-    }
-}
-
-impl From<event::Error> for Error {
-    fn from(e: event::Error) -> Self {
-        Self::Event(e)
     }
 }
 
@@ -231,6 +222,27 @@ impl FromStr for Coordinate {
     }
 }
 
+impl ToBech32 for Coordinate {
+    type Err = nip19::Error;
+
+    #[inline]
+    fn to_bech32(&self) -> Result<String, Self::Err> {
+        self.borrow().to_bech32()
+    }
+}
+
+impl FromBech32 for Coordinate {
+    type Err = nip19::Error;
+
+    fn from_bech32(addr: &str) -> Result<Self, Self::Err> {
+        let coordinate: Nip19Coordinate = Nip19Coordinate::from_bech32(addr)?;
+        Ok(coordinate.coordinate)
+    }
+}
+
+impl ToNostrUri for Coordinate {}
+impl FromNostrUri for Coordinate {}
+
 /// Borrowed coordinate
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CoordinateBorrow<'a> {
@@ -254,6 +266,17 @@ impl CoordinateBorrow<'_> {
         }
     }
 }
+
+impl ToBech32 for CoordinateBorrow<'_> {
+    type Err = nip19::Error;
+
+    #[inline]
+    fn to_bech32(&self) -> Result<String, Self::Err> {
+        nip19::coordinate_to_bech32(*self, &[])
+    }
+}
+
+impl ToNostrUri for CoordinateBorrow<'_> {}
 
 /// Metadata
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

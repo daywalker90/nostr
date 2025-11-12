@@ -18,8 +18,7 @@ use core::str::FromStr;
 
 use bech32::{self, Bech32, Hrp};
 
-use super::nip01::Coordinate;
-#[cfg(all(feature = "std", feature = "nip05"))]
+use super::nip01::{Coordinate, CoordinateBorrow};
 use super::nip05::Nip05Profile;
 #[cfg(feature = "nip49")]
 use super::nip49::{self, EncryptedSecretKey};
@@ -56,7 +55,7 @@ const FIXED_1_1_32_BYTES_TVL: usize = 1 + 1 + 32;
 const FIXED_KIND_BYTES_TVL: usize = 1 + 1 + 4;
 
 /// `NIP19` error
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     /// Relay Url parse error
     RelayUrl(url::Error),
@@ -87,17 +86,17 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RelayUrl(e) => write!(f, "{e}"),
-            Self::Bech32Decode(e) => write!(f, "{e}"),
-            Self::Bech32Encode(e) => write!(f, "{e}"),
-            Self::Keys(e) => write!(f, "{e}"),
-            Self::Event(e) => write!(f, "{e}"),
+            Self::RelayUrl(e) => e.fmt(f),
+            Self::Bech32Decode(e) => e.fmt(f),
+            Self::Bech32Encode(e) => e.fmt(f),
+            Self::Keys(e) => e.fmt(f),
+            Self::Event(e) => e.fmt(f),
             #[cfg(feature = "nip49")]
-            Self::NIP49(e) => write!(f, "{e}"),
-            Self::WrongPrefix => write!(f, "Wrong prefix"),
+            Self::NIP49(e) => e.fmt(f),
+            Self::WrongPrefix => f.write_str("Wrong prefix"),
             Self::FieldMissing(name) => write!(f, "Field missing: {name}"),
-            Self::TLV => write!(f, "TLV error"),
-            Self::TryFromSlice => write!(f, "From slice error"),
+            Self::TLV => f.write_str("TLV error"),
+            Self::TryFromSlice => f.write_str("From slice error"),
         }
     }
 }
@@ -398,8 +397,9 @@ impl Nip19Event {
     }
 
     /// Construct new NIP19 event from [`Event`].
+    #[deprecated(since = "0.44.0", note = "Use `from` instead.")]
     pub fn from_event(event: &Event) -> Self {
-        Self::new(event.id).author(event.pubkey).kind(event.kind)
+        Self::from(event)
     }
 
     /// Add author
@@ -482,6 +482,12 @@ impl Nip19Event {
     }
 }
 
+impl From<&Event> for Nip19Event {
+    fn from(event: &Event) -> Self {
+        Self::new(event.id).author(event.pubkey).kind(event.kind)
+    }
+}
+
 impl FromBech32 for Nip19Event {
     type Err = Error;
 
@@ -537,7 +543,6 @@ impl ToBech32 for Nip19Event {
     }
 }
 
-#[cfg(all(feature = "std", feature = "nip05"))]
 impl ToBech32 for Nip05Profile {
     type Err = Error;
 
@@ -642,22 +647,6 @@ impl FromBech32 for Nip19Profile {
     }
 }
 
-impl FromBech32 for Coordinate {
-    type Err = Error;
-
-    fn from_bech32(addr: &str) -> Result<Self, Self::Err> {
-        let (hrp, data) = bech32::decode(addr)?;
-
-        if hrp != HRP_COORDINATE {
-            return Err(Error::WrongPrefix);
-        }
-
-        let coordinate = Nip19Coordinate::from_bech32_data(data)?;
-
-        Ok(coordinate.coordinate)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Nip19Coordinate {
     pub coordinate: Coordinate,
@@ -756,37 +745,47 @@ impl FromBech32 for Nip19Coordinate {
 impl ToBech32 for Nip19Coordinate {
     type Err = Error;
 
+    #[inline]
     fn to_bech32(&self) -> Result<String, Self::Err> {
-        // Allocate capacity
-        let identifier_len: usize = 2 + self.identifier.len();
-        let relays_len: usize = self.relays.iter().map(|u| 2 + u.as_str().len()).sum();
-        let mut bytes: Vec<u8> = Vec::with_capacity(
-            identifier_len + FIXED_1_1_32_BYTES_TVL + FIXED_KIND_BYTES_TVL + relays_len,
-        );
-
-        // Identifier
-        bytes.push(SPECIAL); // Type
-        bytes.push(self.identifier.len() as u8); // Len
-        bytes.extend(self.identifier.as_bytes()); // Value
-
-        // Author
-        bytes.push(AUTHOR); // Type
-        bytes.push(32); // Len
-        bytes.extend(self.public_key.as_bytes()); // Value
-
-        // Kind
-        bytes.push(KIND); // Type
-        bytes.push(4); // Len
-        bytes.extend((self.kind.as_u16() as u32).to_be_bytes()); // Value
-
-        for relay in self.relays.iter() {
-            bytes.push(RELAY); // Type
-            bytes.push(relay.as_str().len() as u8); // Len
-            bytes.extend(relay.as_str().as_bytes()); // Value
-        }
-
-        Ok(bech32::encode::<Bech32>(HRP_COORDINATE, &bytes)?)
+        coordinate_to_bech32(self.coordinate.borrow(), &self.relays)
     }
+}
+
+pub(super) fn coordinate_to_bech32<'a>(
+    coordinate: CoordinateBorrow<'a>,
+    relays: &[RelayUrl],
+) -> Result<String, Error> {
+    let identifier: &'a str = coordinate.identifier.unwrap_or_default();
+
+    // Allocate capacity
+    let identifier_len: usize = 2 + identifier.len();
+    let relays_len: usize = relays.iter().map(|u| 2 + u.as_str().len()).sum();
+    let mut bytes: Vec<u8> = Vec::with_capacity(
+        identifier_len + FIXED_1_1_32_BYTES_TVL + FIXED_KIND_BYTES_TVL + relays_len,
+    );
+
+    // Identifier
+    bytes.push(SPECIAL); // Type
+    bytes.push(identifier.len() as u8); // Len
+    bytes.extend(identifier.as_bytes()); // Value
+
+    // Author
+    bytes.push(AUTHOR); // Type
+    bytes.push(32); // Len
+    bytes.extend(coordinate.public_key.as_bytes()); // Value
+
+    // Kind
+    bytes.push(KIND); // Type
+    bytes.push(4); // Len
+    bytes.extend((coordinate.kind.as_u16() as u32).to_be_bytes()); // Value
+
+    for relay in relays.iter() {
+        bytes.push(RELAY); // Type
+        bytes.push(relay.as_str().len() as u8); // Len
+        bytes.extend(relay.as_str().as_bytes()); // Value
+    }
+
+    Ok(bech32::encode::<Bech32>(HRP_COORDINATE, &bytes)?)
 }
 
 #[cfg(test)]

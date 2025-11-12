@@ -41,12 +41,14 @@ pub enum TagKind<'a> {
     ///
     /// <https://github.com/nostr-protocol/nips/blob/master/34.md>
     Commit,
+    /// HEAD
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/34.md>
+    Head,
     /// Content warning
     ContentWarning,
     /// Current participants
     CurrentParticipants,
-    /// Delegation
-    Delegation,
     /// Required dependency
     ///
     /// <https://github.com/nostr-protocol/nips/blob/master/C0.md>
@@ -199,7 +201,7 @@ impl Hash for TagKind<'_> {
 impl<'a> TagKind<'a> {
     /// Construct a single letter tag
     #[inline]
-    pub fn single_letter(character: Alphabet, uppercase: bool) -> Self {
+    pub const fn single_letter(character: Alphabet, uppercase: bool) -> Self {
         Self::SingleLetter(SingleLetterTag {
             character,
             uppercase,
@@ -210,7 +212,7 @@ impl<'a> TagKind<'a> {
     ///
     /// Shorthand for `TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::A))`.
     #[inline]
-    pub fn a() -> Self {
+    pub const fn a() -> Self {
         Self::single_letter(Alphabet::A, false)
     }
 
@@ -218,7 +220,7 @@ impl<'a> TagKind<'a> {
     ///
     /// Shorthand for `TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D))`.
     #[inline]
-    pub fn d() -> Self {
+    pub const fn d() -> Self {
         Self::single_letter(Alphabet::D, false)
     }
 
@@ -226,7 +228,7 @@ impl<'a> TagKind<'a> {
     ///
     /// Shorthand for `TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E))`.
     #[inline]
-    pub fn e() -> Self {
+    pub const fn e() -> Self {
         Self::single_letter(Alphabet::E, false)
     }
 
@@ -234,7 +236,7 @@ impl<'a> TagKind<'a> {
     ///
     /// Shorthand for `TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H))`.
     #[inline]
-    pub fn h() -> Self {
+    pub const fn h() -> Self {
         Self::single_letter(Alphabet::H, false)
     }
 
@@ -242,7 +244,7 @@ impl<'a> TagKind<'a> {
     ///
     /// Shorthand for `TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::I))`.
     #[inline]
-    pub fn i() -> Self {
+    pub const fn i() -> Self {
         Self::single_letter(Alphabet::I, false)
     }
 
@@ -250,7 +252,7 @@ impl<'a> TagKind<'a> {
     ///
     /// Shorthand for `TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K))`.
     #[inline]
-    pub fn k() -> Self {
+    pub const fn k() -> Self {
         Self::single_letter(Alphabet::K, false)
     }
 
@@ -258,7 +260,7 @@ impl<'a> TagKind<'a> {
     ///
     /// Shorthand for `TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P))`.
     #[inline]
-    pub fn p() -> Self {
+    pub const fn p() -> Self {
         Self::single_letter(Alphabet::P, false)
     }
 
@@ -266,7 +268,7 @@ impl<'a> TagKind<'a> {
     ///
     /// Shorthand for `TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T))`.
     #[inline]
-    pub fn t() -> Self {
+    pub const fn t() -> Self {
         Self::single_letter(Alphabet::T, false)
     }
 
@@ -274,7 +276,7 @@ impl<'a> TagKind<'a> {
     ///
     /// Shorthand for `TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::U))`.
     #[inline]
-    pub fn u() -> Self {
+    pub const fn u() -> Self {
         Self::single_letter(Alphabet::U, false)
     }
 
@@ -282,7 +284,7 @@ impl<'a> TagKind<'a> {
     ///
     /// Shorthand for `TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Q))`.
     #[inline]
-    pub fn q() -> Self {
+    pub const fn q() -> Self {
         Self::single_letter(Alphabet::Q, false)
     }
 
@@ -290,7 +292,7 @@ impl<'a> TagKind<'a> {
     ///
     /// Shorthand for `TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::X))`.
     #[inline]
-    pub fn x() -> Self {
+    pub const fn x() -> Self {
         Self::single_letter(Alphabet::X, false)
     }
 
@@ -320,7 +322,6 @@ impl<'a> TagKind<'a> {
             Self::Commit => "commit",
             Self::ContentWarning => "content-warning",
             Self::CurrentParticipants => "current_participants",
-            Self::Delegation => "delegation",
             Self::Dependency => "dep",
             Self::Description => "description",
             Self::Dim => "dim",
@@ -330,6 +331,7 @@ impl<'a> TagKind<'a> {
             Self::Expiration => "expiration",
             Self::Extension => "extension",
             Self::File => "file",
+            Self::Head => "HEAD",
             Self::Image => "image",
             Self::License => "license",
             Self::Lnurl => "lnurl",
@@ -397,7 +399,6 @@ impl<'a> From<&'a str> for TagKind<'a> {
             "commit" => Self::Commit,
             "content-warning" => Self::ContentWarning,
             "current_participants" => Self::CurrentParticipants,
-            "delegation" => Self::Delegation,
             "dep" => Self::Dependency,
             "description" => Self::Description,
             "dim" => Self::Dim,
@@ -505,6 +506,9 @@ mod tests {
 
         assert_eq!(TagKind::from("file"), TagKind::File);
         assert_eq!(TagKind::File.as_str(), "file");
+
+        assert_eq!(TagKind::from("HEAD"), TagKind::Head);
+        assert_eq!(TagKind::Head.as_str(), "HEAD");
 
         assert_eq!(TagKind::from("license"), TagKind::License);
         assert_eq!(TagKind::License.as_str(), "license");

@@ -23,6 +23,8 @@ pub struct RelayOptions {
     pub(super) idle_timeout: Duration,
     pub(super) retry_interval: Duration,
     pub(super) adjust_retry_interval: bool,
+    pub(super) verify_subscriptions: bool,
+    pub(super) ban_relay_on_mismatch: bool,
     pub(super) limits: RelayLimits,
     pub(super) max_avg_latency: Option<Duration>,
     pub(super) notification_channel_size: usize,
@@ -38,6 +40,8 @@ impl Default for RelayOptions {
             idle_timeout: Duration::from_secs(300),
             retry_interval: DEFAULT_RETRY_INTERVAL,
             adjust_retry_interval: true,
+            verify_subscriptions: false,
+            ban_relay_on_mismatch: false,
             limits: RelayLimits::default(),
             max_avg_latency: None,
             notification_channel_size: DEFAULT_NOTIFICATION_CHANNEL_SIZE,
@@ -110,6 +114,18 @@ impl RelayOptions {
     /// Automatically adjust retry interval based on success/attempts (default: true)
     pub fn adjust_retry_interval(mut self, adjust_retry_interval: bool) -> Self {
         self.adjust_retry_interval = adjust_retry_interval;
+        self
+    }
+
+    /// Verify that received events belong to a subscription and match the filter.
+    pub fn verify_subscriptions(mut self, enable: bool) -> Self {
+        self.verify_subscriptions = enable;
+        self
+    }
+
+    /// If true, ban a relay when it sends an event that doesn't match the subscription filter.
+    pub fn ban_relay_on_mismatch(mut self, ban_relay: bool) -> Self {
+        self.ban_relay_on_mismatch = ban_relay;
         self
     }
 
@@ -351,16 +367,17 @@ mod tests {
     #[test]
     fn test_close() {
         let opts = SubscribeOptions::default();
-        assert_eq!(opts.is_auto_closing(), false);
+        assert!(!opts.is_auto_closing());
         let opts = SubscribeOptions::default().close_on(Some(SubscribeAutoCloseOptions::default()));
-        assert_eq!(opts.is_auto_closing(), true);
+        assert!(opts.is_auto_closing());
     }
 
     #[test]
     fn test_sync_progress_percentage() {
-        let mut sp = SyncProgress::default();
-        sp.total = 5;
-        sp.current = 2;
+        let sp = SyncProgress {
+            total: 5,
+            current: 2,
+        };
         assert_eq!(sp.percentage(), 2f64 / 5f64);
         let sp_zero = SyncProgress::default();
         assert_eq!(sp_zero.percentage(), 0.0);

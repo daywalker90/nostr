@@ -2,29 +2,29 @@
 
 ## Project structure
 
-The project is split up into several crates in the `crates/` directory:
+The project is split up into several crates:
 
-* Libraries:
-    * [**nostr**](./crates/nostr): Rust implementation of Nostr protocol
-    * [**nostr-blossom**](./crates/nostr-blossom): A library for interacting with the Blossom protocol
-    * [**nostr-connect**](./crates/nostr-connect): Nostr Connect (NIP46)
-    * [**nostr-database**](./crates/nostr-database): Events database abstraction and in-memory implementation
-        * [**nostr-lmdb**](./crates/nostr-lmdb): LMDB storage backend
-        * [**nostr-ndb**](./crates/nostr-ndb): [nostrdb](https://github.com/damus-io/nostrdb) storage backend
-        * [**nostr-indexeddb**](./crates/nostr-indexeddb): IndexedDB storage backend
-    * [**nostr-mls**](./mls/nostr-mls): A library for implementing NIP-EE MLS messaging
-    * [**nostr-mls-storage**](./mls/nostr-mls-storage): Storage traits for using MLS messaging
-        * [**nostr-mls-memory-storage**](./mls/nostr-mls-memory-storage): In-memory storage for nostr-mls
-        * [**nostr-mls-sqlite-storage**](./mls/nostr-mls-sqlite-storage): Sqlite storage for nostr-mls
-    * [**nostr-keyring**](./crates/nostr-keyring): Nostr Keyring
-    * [**nostr-relay-pool**](./crates/nostr-relay-pool): Nostr Relay Pool
-    * [**nostr-sdk**](./crates/nostr-sdk): High level client library
-    * [**nwc**](./crates/nwc): Nostr Wallet Connect (NWC) client
-* Binaries (tools):
-    * [**nostr-cli**](./crates/nostr-cli): Nostr CLI
+- [**nostr**](./crates/nostr): Rust implementation of Nostr protocol
+- Signers
+    - [**nostr-browser-signer**](./signer/nostr-browser-signer): Nostr Browser signer implementation (NIP-07)
+    - [**nostr-browser-signer-proxy**](./signer/nostr-browser-signer-proxy): Proxy for using the Nostr Browser signer (NIP-07) in native applications
+    - [**nostr-connect**](./signer/nostr-connect): Nostr Connect (NIP-46) 
+- [**nostr-database**](./database/nostr-database): Events database abstraction and in-memory implementation
+    - [**nostr-lmdb**](./database/nostr-lmdb): LMDB storage backend
+    - [**nostr-ndb**](./database/nostr-ndb): [nostrdb](https://github.com/damus-io/nostrdb) storage backend
+    - [**nostr-indexeddb**](./database/nostr-indexeddb): IndexedDB storage backend
+- [**nostr-gossip**](./gossip/nostr-gossip): Gossip traits
+    - [**nostr-gossip-memory**](./gossip/nostr-gossip-memory): In-memory gossip database
+- Remote File Storage implementations:
+    - [**nostr-blossom**](./rfs/nostr-blossom): A library for interacting with the Blossom protocol
+    - [**nostr-http-file-storage**](./rfs/nostr-http-file-storage): HTTP File Storage client (NIP-96)
+- [**nostr-keyring**](./crates/nostr-keyring): Nostr Keyring
+- [**nostr-relay-pool**](./crates/nostr-relay-pool): Nostr Relay Pool
+- [**nostr-sdk**](./crates/nostr-sdk): High level client library
+- [**nwc**](./crates/nwc): Nostr Wallet Connect (NWC) client (NIP-47)
 
 > Note: this repository contains the Rust codebase.
-> There are several other projects (i.e., bindings)
+> There are several other projects (i.e., bindings, CLI, etc.)
 > which are maintained in other repositories <https://rust-nostr.org/projects>.
 
 ### Embedded
@@ -47,6 +47,7 @@ Learn more about `rust-nostr` at <https://rust-nostr.org>.
 |     ✅     | [05 - Mapping Nostr keys to DNS-based internet ids](https://github.com/nostr-protocol/nips/blob/master/05.md)   |
 |     ✅     | [06 - Basic key derivation from mnemonic seed phrase](https://github.com/nostr-protocol/nips/blob/master/06.md) |
 |     ✅     | [07 - `window.nostr` capability for web browsers](https://github.com/nostr-protocol/nips/blob/master/07.md)     |
+|     ❌     | [08 - Handling Mentions](https://github.com/nostr-protocol/nips/blob/master/08.md)                              |
 |     ✅     | [09 - Event Deletion](https://github.com/nostr-protocol/nips/blob/master/09.md)                                 |
 |     ✅     | [10 - Use of `e` and `p` tags in text events](https://github.com/nostr-protocol/nips/blob/master/10.md)         |
 |     ✅     | [11 - Relay Information Document](https://github.com/nostr-protocol/nips/blob/master/11.md)                     |
@@ -92,11 +93,13 @@ Learn more about `rust-nostr` at <https://rust-nostr.org>.
 |     ✅     | [57 - Lightning Zaps](https://github.com/nostr-protocol/nips/blob/master/57.md)                                 |
 |     ✅     | [58 - Badges](https://github.com/nostr-protocol/nips/blob/master/58.md)                                         |
 |     ✅     | [59 - Gift Wrap](https://github.com/nostr-protocol/nips/blob/master/59.md)                                      |
-|     ❌     | [60 - Cashu Wallet](https://github.com/nostr-protocol/nips/blob/master/60.md)                                   |
+|     ✅     | [60 - Cashu Wallet](https://github.com/nostr-protocol/nips/blob/master/60.md)                                   |
 |     ❌     | [61 - Nutzaps](https://github.com/nostr-protocol/nips/blob/master/61.md)                                        |
 |     ✅     | [62 - Request to Vanish](https://github.com/nostr-protocol/nips/blob/master/62.md)                              |
+|     ❌     | [64 - Chess (PGN)](https://github.com/nostr-protocol/nips/blob/master/64.md)                                    |
 |     ✅     | [65 - Relay List Metadata](https://github.com/nostr-protocol/nips/blob/master/65.md)                            |
 |     ❌     | [66 - Relay Discovery and Liveness Monitoring](https://github.com/nostr-protocol/nips/blob/master/66.md)        |
+|     ❌     | [68 - Picture-first feeds](https://github.com/nostr-protocol/nips/blob/master/68.md)                            |
 |     ❌     | [69 - P2P Order events](https://github.com/nostr-protocol/nips/blob/master/69.md)                               |
 |     ✅     | [70 - Protected Events](https://github.com/nostr-protocol/nips/blob/master/70.md)                               |
 |     ❌     | [71 - Video Events](https://github.com/nostr-protocol/nips/blob/master/71.md)                                   |
@@ -105,9 +108,10 @@ Learn more about `rust-nostr` at <https://rust-nostr.org>.
 |     ❌     | [75 - Zap Goals](https://github.com/nostr-protocol/nips/blob/master/75.md)                                      |
 |     ✅     | [77 - Negentropy Syncing](https://github.com/nostr-protocol/nips/blob/master/77.md)                             |
 |     ✅     | [78 - Arbitrary custom app data](https://github.com/nostr-protocol/nips/blob/master/78.md)                      |
-|     ❌     | [7D - Threads](https://github.com/nostr-protocol/nips/blob/master/7D.md)                                        |
+|     ✅     | [7D - Threads](https://github.com/nostr-protocol/nips/blob/master/7D.md)                                        |
 |     ❌     | [84 - Highlights](https://github.com/nostr-protocol/nips/blob/master/84.md)                                     |
 |     ❌     | [86 - Relay Management API](https://github.com/nostr-protocol/nips/blob/master/86.md)                           |
+|     ❌     | [87 - Ecash Mint Discoverability](https://github.com/nostr-protocol/nips/blob/master/87.md)                     |
 |     ✅     | [88 - Polls](https://github.com/nostr-protocol/nips/blob/master/88.md)                                          |
 |     ❌     | [89 - Recommended Application Handlers](https://github.com/nostr-protocol/nips/blob/master/89.md)               |
 |     ✅     | [90 - Data Vending Machine](https://github.com/nostr-protocol/nips/blob/master/90.md)                           |
@@ -116,10 +120,12 @@ Learn more about `rust-nostr` at <https://rust-nostr.org>.
 |     ✅     | [96 - HTTP File Storage Integration](https://github.com/nostr-protocol/nips/blob/master/96.md)                  |
 |     ✅     | [98 - HTTP Auth](https://github.com/nostr-protocol/nips/blob/master/98.md)                                      |
 |     ❌     | [99 - Classified Listings](https://github.com/nostr-protocol/nips/blob/master/99.md)                            |
-|     ❌     | [B0 - Web Bookmarks](https://github.com/nostr-protocol/nips/blob/master/B0.md)                                  |
+|     ✅     | [A0 - Voice Messages](https://github.com/nostr-protocol/nips/blob/master/A0.md)                                 |
+|     ✅     | [B0 - Web Bookmarks](https://github.com/nostr-protocol/nips/blob/master/B0.md)                                  |
 |     ✅     | [B7 - Blossom](https://github.com/nostr-protocol/nips/blob/master/B7.md)                                        |
 |     ✅     | [C0 - Code Snippets](https://github.com/nostr-protocol/nips/blob/master/C0.md)                                  |
-|     ❌     | [C7 - Chats](https://github.com/nostr-protocol/nips/blob/master/C7.md)                                          |
+|     ✅     | [C7 - Chats](https://github.com/nostr-protocol/nips/blob/master/C7.md)                                          |
+|     ✅     | [EE - Messaging using the MLS Protocol](https://github.com/nostr-protocol/nips/blob/master/EE.md)               |
 
 ## State
 

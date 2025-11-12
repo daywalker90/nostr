@@ -6,20 +6,26 @@
 
 use std::time::Duration;
 
-use nostr_relay_pool::{ConnectionMode, RelayOptions};
+use nostr_relay_pool::monitor::Monitor;
+use nostr_relay_pool::RelayOptions;
+
+/// Default timeout
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// NWC options
 #[derive(Debug, Clone)]
 pub struct NostrWalletConnectOptions {
     pub(super) relay: RelayOptions,
     pub(super) timeout: Duration,
+    pub(super) monitor: Option<Monitor>,
 }
 
 impl Default for NostrWalletConnectOptions {
     fn default() -> Self {
         Self {
             relay: RelayOptions::default(),
-            timeout: Duration::from_secs(60),
+            timeout: DEFAULT_TIMEOUT,
+            monitor: None,
         }
     }
 }
@@ -31,18 +37,25 @@ impl NostrWalletConnectOptions {
         Self::default()
     }
 
-    /// Set connection mode
-    pub fn connection_mode(self, mode: ConnectionMode) -> Self {
-        Self {
-            relay: self.relay.connection_mode(mode),
-            ..self
-        }
-    }
-
-    /// Set NWC requests timeout (default: 10 secs)
+    /// Set NWC requests timeout (default: [`DEFAULT_TIMEOUT`])
     #[inline]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// Set Relay Pool monitor
+    #[inline]
+    pub fn monitor(mut self, monitor: Monitor) -> Self {
+        self.monitor = Some(monitor);
+        self
+    }
+
+    /// Set relay options
+    pub fn relay(self, opts: RelayOptions) -> Self {
+        Self {
+            relay: opts,
+            ..self
+        }
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "nostr-relay-builder"
-version = "0.42.0"
+version = "0.44.0"
 edition = "2021"
 description = "Build your own custom nostr relay!"
 authors.workspace = true
@@ -19,6 +19,7 @@ tor = ["async-wsocket/tor-launch-service"]
 async-utility.workspace = true
 async-wsocket.workspace = true
 atomic-destructor.workspace = true
+hex = { workspace = true, features = ["std"] }
 negentropy = { workspace = true, features = ["std"] }
 nostr = { workspace = true, default-features = false, features = ["std"] }
 nostr-database.workspace = true

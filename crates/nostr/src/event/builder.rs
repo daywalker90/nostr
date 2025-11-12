@@ -8,6 +8,12 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 use core::ops::Range;
+#[cfg(feature = "pow-multi-thread")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "pow-multi-thread")]
+use std::sync::Arc;
+#[cfg(feature = "pow-multi-thread")]
+use std::thread::{self, JoinHandle};
 
 #[cfg(feature = "std")]
 use secp256k1::rand::rngs::OsRng;
@@ -30,14 +36,14 @@ pub enum WrongKindError {
 impl fmt::Display for WrongKindError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Single(k) => write!(f, "{k}"),
+            Self::Single(k) => k.fmt(f),
             Self::Range(range) => write!(f, "'{} <= k <= {}'", range.start, range.end),
         }
     }
 }
 
 /// Event builder error
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     /// Unsigned event error
     Event(super::Error),
@@ -49,6 +55,8 @@ pub enum Error {
     /// NIP04 error
     #[cfg(feature = "nip04")]
     NIP04(nip04::Error),
+    /// NIP21 error
+    NIP21(nip21::Error),
     /// NIP44 error
     #[cfg(all(feature = "std", feature = "nip44"))]
     NIP44(nip44::Error),
@@ -74,21 +82,22 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Event(e) => write!(f, "{e}"),
-            Self::NIP01(e) => write!(f, "{e}"),
+            Self::Event(e) => e.fmt(f),
+            Self::NIP01(e) => e.fmt(f),
             #[cfg(feature = "nip03")]
-            Self::NIP03(e) => write!(f, "{e}"),
+            Self::NIP03(e) => e.fmt(f),
             #[cfg(feature = "nip04")]
-            Self::NIP04(e) => write!(f, "{e}"),
+            Self::NIP04(e) => e.fmt(f),
+            Self::NIP21(e) => e.fmt(f),
             #[cfg(all(feature = "std", feature = "nip44"))]
-            Self::NIP44(e) => write!(f, "{e}"),
-            Self::NIP58(e) => write!(f, "{e}"),
+            Self::NIP44(e) => e.fmt(f),
+            Self::NIP58(e) => e.fmt(f),
             #[cfg(all(feature = "std", feature = "nip59"))]
-            Self::NIP59(e) => write!(f, "{e}"),
+            Self::NIP59(e) => e.fmt(f),
             Self::WrongKind { received, expected } => {
                 write!(f, "Wrong kind: received={received}, expected={expected}")
             }
-            Self::EmptyTags => write!(f, "Empty tags, while at least one tag is required"),
+            Self::EmptyTags => f.write_str("At least one tag is required"),
         }
     }
 }
@@ -122,6 +131,12 @@ impl From<nostr_ots::Error> for Error {
 impl From<nip04::Error> for Error {
     fn from(e: nip04::Error) -> Self {
         Self::NIP04(e)
+    }
+}
+
+impl From<nip21::Error> for Error {
+    fn from(e: nip21::Error) -> Self {
+        Self::NIP21(e)
     }
 }
 
@@ -193,6 +208,14 @@ impl EventBuilder {
         self
     }
 
+    /// Add tag if `Some`.
+    pub fn tag_maybe(mut self, tag: Option<Tag>) -> Self {
+        if let Some(tag) = tag {
+            self.tags.push(tag);
+        }
+        self
+    }
+
     /// Add tags
     ///
     /// This method extends the current tags.
@@ -239,6 +262,168 @@ impl EventBuilder {
         self
     }
 
+    /// Returns the [`EventId`] if the POW difficulty is satisfied.
+    fn check_nonce(
+        &mut self,
+        public_key: &PublicKey,
+        created_at: &Timestamp,
+        nonce: u128,
+        difficulty: u8,
+    ) -> Option<EventId> {
+        // Push POW tag
+        self.tags.push(Tag::pow(nonce, difficulty));
+
+        // Compute event ID
+        let id: EventId = EventId::new(
+            public_key,
+            created_at,
+            &self.kind,
+            &self.tags,
+            &self.content,
+        );
+
+        // Check POW difficulty
+        if id.check_pow(difficulty) {
+            Some(id)
+        } else {
+            // Remove tag if the nonce doesn't satisfy the difficulty requirement
+            self.tags.pop();
+            None
+        }
+    }
+
+    /// Mine PoW using single thread (fallback method)
+    fn mine_pow_single_thread<T>(
+        mut self,
+        supplier: &T,
+        public_key: PublicKey,
+        difficulty: u8,
+    ) -> UnsignedEvent
+    where
+        T: TimeSupplier,
+    {
+        let mut nonce: u128 = 0;
+
+        loop {
+            nonce += 1;
+
+            let created_at: Timestamp = self
+                .custom_created_at
+                .unwrap_or_else(|| Timestamp::now_with_supplier(supplier));
+
+            // Check if the nonce satisfies the difficulty requirement
+            if let Some(id) = self.check_nonce(&public_key, &created_at, nonce, difficulty) {
+                return UnsignedEvent {
+                    id: Some(id),
+                    pubkey: public_key,
+                    created_at,
+                    kind: self.kind,
+                    tags: self.tags,
+                    content: self.content,
+                };
+            }
+        }
+    }
+
+    /// Mine PoW using multiple threads with std::thread
+    ///
+    /// Fallback to [`Self::mine_pow_single_thread`] if:
+    /// - the number of threads is `1`;
+    /// - thread spawning or coordination fails;
+    /// - no valid solution is found by any thread (rare edge case)
+    #[cfg(feature = "pow-multi-thread")]
+    fn mine_pow_multi_thread<T>(
+        self,
+        supplier: &T,
+        public_key: PublicKey,
+        difficulty: u8,
+    ) -> UnsignedEvent
+    where
+        T: TimeSupplier,
+    {
+        // Get the number of available CPU cores
+        let num_threads = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        // Single thread fallback
+        if num_threads == 1 {
+            return self.mine_pow_single_thread(supplier, public_key, difficulty);
+        }
+
+        let found: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+        let mut handles: Vec<JoinHandle<Option<UnsignedEvent>>> = Vec::with_capacity(num_threads);
+
+        // Spawn threads
+        for thread_id in 0..num_threads {
+            let found: Arc<AtomicBool> = found.clone();
+
+            let mut builder: Self = self.clone();
+
+            // Create a timestamp
+            // TODO: move this into the thread loop
+            let created_at: Timestamp = self
+                .custom_created_at
+                .unwrap_or_else(|| Timestamp::now_with_supplier(supplier));
+
+            let handle: JoinHandle<Option<UnsignedEvent>> = thread::spawn(move || {
+                let mut nonce: u128 = thread_id as u128;
+
+                loop {
+                    // Check if another thread found the solution
+                    if found.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    nonce += num_threads as u128;
+
+                    // Check if the nonce satisfies the difficulty requirement
+                    if let Some(id) =
+                        builder.check_nonce(&public_key, &created_at, nonce, difficulty)
+                    {
+                        // We found a valid nonce, signal other threads to stop and store the result
+                        found.store(true, Ordering::Relaxed);
+
+                        // Return the unsigned event
+                        return Some(UnsignedEvent {
+                            id: Some(id),
+                            pubkey: public_key,
+                            created_at,
+                            kind: builder.kind,
+                            tags: builder.tags,
+                            content: builder.content,
+                        });
+                    }
+                }
+
+                None
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all threads to finish (non-blocking)
+        loop {
+            if found.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+
+        // Find result
+        for handle in handles.into_iter() {
+            // NOTE: this shouldn't block the current thread,
+            // since above we've checked if the solution has been found
+            // (so all threads should be terminated).
+            if let Ok(Some(unsigned)) = handle.join() {
+                return unsigned;
+            }
+        }
+
+        // Single thread fallback
+        self.mine_pow_single_thread(supplier, public_key, difficulty)
+    }
+
     /// Build an unsigned event
     ///
     /// By default, this method removes any `p` tags that match the author's public key.
@@ -271,36 +456,13 @@ impl EventBuilder {
         // Check if should be POW
         match self.pow {
             Some(difficulty) if difficulty > 0 => {
-                let mut nonce: u128 = 0;
-
-                loop {
-                    nonce += 1;
-
-                    self.tags.push(Tag::pow(nonce, difficulty));
-
-                    let created_at: Timestamp = self
-                        .custom_created_at
-                        .unwrap_or_else(|| Timestamp::now_with_supplier(supplier));
-                    let id: EventId = EventId::new(
-                        &public_key,
-                        &created_at,
-                        &self.kind,
-                        &self.tags,
-                        &self.content,
-                    );
-
-                    if id.check_pow(difficulty) {
-                        return UnsignedEvent {
-                            id: Some(id),
-                            pubkey: public_key,
-                            created_at,
-                            kind: self.kind,
-                            tags: self.tags,
-                            content: self.content,
-                        };
-                    }
-
-                    self.tags.pop();
+                #[cfg(not(feature = "pow-multi-thread"))]
+                {
+                    self.mine_pow_single_thread(supplier, public_key, difficulty)
+                }
+                #[cfg(feature = "pow-multi-thread")]
+                {
+                    self.mine_pow_multi_thread(supplier, public_key, difficulty)
                 }
             }
             // No POW difficulty set OR difficulty == 0
@@ -493,108 +655,15 @@ impl EventBuilder {
 
     /// Comment
     ///
-    /// This adds only that most significant tags, like:
-    /// - `p` tag with the author of the `comment_to` event;
-    /// - the `a`/`e` and `k` tags of the `comment_to` event;
-    /// - `P` tag with the author of the `root` event;
-    /// - the `A`/`E` and `K` tags of the `root` event.
-    ///
-    /// Any additional necessary tag can be added with [`EventBuilder::tag`] or [`EventBuilder::tags`].
-    ///
     /// <https://github.com/nostr-protocol/nips/blob/master/22.md>
-    pub fn comment<S>(
-        content: S,
-        comment_to: &Event,
-        root: Option<&Event>,
-        relay_url: Option<RelayUrl>,
-    ) -> Self
+    pub fn comment<'a, S, T>(content: S, comment_to: T, root: Option<T>) -> Self
     where
+        T: Into<CommentTarget<'a>>,
         S: Into<String>,
     {
-        // Not use `comment_to` as root if no root is set.
-        // It's better to have no tags than wrong tags.
-        // Issue: https://github.com/rust-nostr/nostr/issues/655
-
-        // The added tags will be at least 3
-        let mut tags: Vec<Tag> = Vec::with_capacity(3);
-
-        // Tag the author of the event you are replying to.
-        // This is the most significant public key since it's the one you are replying to, so put it first.
-        tags.push(Tag::public_key(comment_to.pubkey));
-
-        // Add `k` tag of event kind
-        tags.push(Tag::from_standardized_without_cell(TagStandard::Kind {
-            kind: comment_to.kind,
-            uppercase: false,
-        }));
-
-        // If event has coordinate, add `a` tag otherwise push `e` tag
-        match comment_to.coordinate() {
-            Some(coordinate) => {
-                tags.push(Tag::from_standardized_without_cell(
-                    TagStandard::Coordinate {
-                        coordinate: coordinate.into_owned(),
-                        relay_url: relay_url.clone(),
-                        uppercase: false, // <--- Same as root event but lowercase
-                    },
-                ));
-            }
-            None => {
-                // Add `e` tag of event author
-                tags.push(Tag::from_standardized_without_cell(TagStandard::Event {
-                    event_id: comment_to.id,
-                    relay_url: relay_url.clone(),
-                    marker: None,
-                    public_key: Some(comment_to.pubkey),
-                    uppercase: false,
-                }));
-            }
-        }
-
-        // Add `A`, `E` and `K` tag of **root** event
-        if let Some(root) = root {
-            // If event has coordinate, add it to tags otherwise push the event ID
-            match root.coordinate() {
-                Some(coordinate) => {
-                    tags.push(Tag::from_standardized_without_cell(
-                        TagStandard::Coordinate {
-                            coordinate: coordinate.into_owned(),
-                            relay_url,
-                            uppercase: true,
-                        },
-                    ));
-                }
-                None => {
-                    // ID and author
-                    tags.push(Tag::from_standardized_without_cell(TagStandard::Event {
-                        event_id: root.id,
-                        relay_url,
-                        marker: None,
-                        public_key: Some(root.pubkey),
-                        uppercase: true,
-                    }));
-                }
-            }
-
-            // Add `P` tag of the root event
-            tags.push(Tag::from_standardized_without_cell(
-                TagStandard::PublicKey {
-                    public_key: root.pubkey,
-                    relay_url: None,
-                    alias: None,
-                    uppercase: true,
-                },
-            ));
-
-            // Add `K` tag of the root event
-            tags.push(Tag::from_standardized_without_cell(TagStandard::Kind {
-                kind: root.kind,
-                uppercase: true,
-            }));
-        }
-
-        // Compose event
-        Self::new(Kind::Comment, content).tags(tags)
+        Self::new(Kind::Comment, content)
+            .tags(root.map(|c| c.into().as_vec(true)).unwrap_or_default())
+            .tags(comment_to.into().as_vec(false))
     }
 
     /// Long-form text note (generally referred to as "articles" or "blog posts").
@@ -741,42 +810,49 @@ impl EventBuilder {
         Ok(builder)
     }
 
-    /// Add reaction (like/upvote, dislike/downvote or emoji) to an event
+    /// Voice Message
     ///
-    /// <https://github.com/nostr-protocol/nips/blob/master/25.md>
+    /// Note: This will not add `imeta` tag ([NIP-92])
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/A0.md>
+    ///
+    /// [NIP-92]: https://github.com/nostr-protocol/nips/blob/master/92.md
     #[inline]
-    pub fn reaction<S>(event: &Event, reaction: S) -> Self
+    pub fn voice_message<T>(voice_url: T) -> Self
     where
-        S: Into<String>,
+        T: Into<Url>,
     {
-        Self::reaction_extended(event.id, event.pubkey, Some(event.kind), reaction)
+        EventBuilder::new(Kind::VoiceMessage, voice_url.into().as_str())
+    }
+
+    /// Voice Message Reply
+    ///
+    /// Note: This will not add `imeta` tag ([NIP-92])
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/A0.md>
+    ///
+    /// [NIP-92]: https://github.com/nostr-protocol/nips/blob/master/92.md
+    #[inline]
+    pub fn voice_message_reply<'a, T, U>(voice_url: U, root: Option<T>, parent: T) -> Self
+    where
+        T: Into<CommentTarget<'a>>,
+        U: Into<Url>,
+    {
+        EventBuilder::new(Kind::VoiceMessageReply, voice_url.into().as_str())
+            .tags(root.map(|c| c.into().as_vec(true)).unwrap_or_default())
+            .tags(parent.into().as_vec(false))
     }
 
     /// Add reaction (like/upvote, dislike/downvote or emoji) to an event
     ///
     /// <https://github.com/nostr-protocol/nips/blob/master/25.md>
-    pub fn reaction_extended<S>(
-        event_id: EventId,
-        public_key: PublicKey,
-        kind: Option<Kind>,
-        reaction: S,
-    ) -> Self
+    #[inline]
+    pub fn reaction<T, S>(target: T, reaction: S) -> Self
     where
+        T: Into<ReactionTarget>,
         S: Into<String>,
     {
-        let mut tags: Vec<Tag> = Vec::with_capacity(2 + usize::from(kind.is_some()));
-
-        tags.push(Tag::event(event_id));
-        tags.push(Tag::public_key(public_key));
-
-        if let Some(kind) = kind {
-            tags.push(Tag::from_standardized_without_cell(TagStandard::Kind {
-                kind,
-                uppercase: false,
-            }));
-        }
-
-        Self::new(Kind::Reaction, reaction).tags(tags)
+        Self::new(Kind::Reaction, reaction).tags(target.into().into_tags())
     }
 
     /// Create a new channel
@@ -1787,6 +1863,115 @@ impl EventBuilder {
     pub fn poll_response(response: PollResponse) -> Self {
         response.to_event_builder()
     }
+
+    /// Chat message
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/C7.md>
+    #[inline]
+    pub fn chat_message<S>(content: S) -> Self
+    where
+        S: Into<String>,
+    {
+        Self::new(Kind::ChatMessage, content)
+    }
+
+    /// Chat message reply
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/C7.md>
+    pub fn chat_message_reply<S>(
+        content: S,
+        reply_to: &Event,
+        relay_url: Option<RelayUrl>,
+    ) -> Result<Self, Error>
+    where
+        S: Into<String>,
+    {
+        let mut content = content.into();
+
+        if !has_nostr_event_uri(&content, &reply_to.id) {
+            let nevent = Nip19Event {
+                event_id: reply_to.id,
+                author: None,
+                kind: None,
+                relays: relay_url.clone().into_iter().collect(),
+            };
+            content = format!("{}\n{content}", nevent.to_nostr_uri()?);
+        }
+
+        Ok(
+            Self::new(Kind::ChatMessage, content).tag(Tag::from_standardized_without_cell(
+                TagStandard::Quote {
+                    event_id: reply_to.id,
+                    relay_url,
+                    public_key: Some(reply_to.pubkey),
+                },
+            )),
+        )
+    }
+
+    /// Thread
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/7D.md>
+    #[inline]
+    pub fn thread<S>(content: S, title: Option<String>) -> Self
+    where
+        S: Into<String>,
+    {
+        let mut builder = Self::new(Kind::Thread, content);
+        if let Some(t) = title {
+            builder = builder.tag(Tag::from_standardized_without_cell(TagStandard::Title(t)));
+        }
+        builder
+    }
+
+    /// Thread reply
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/7D.md>
+    #[inline]
+    pub fn thread_reply<S>(content: S, reply_to: &Event, relay_url: Option<RelayUrl>) -> Self
+    where
+        S: Into<String>,
+    {
+        let tags = vec![
+            Tag::from_standardized_without_cell(TagStandard::Event {
+                event_id: reply_to.id,
+                relay_url,
+                marker: None,
+                public_key: Some(reply_to.pubkey),
+                uppercase: true,
+            }),
+            Tag::from_standardized_without_cell(TagStandard::Kind {
+                kind: Kind::Thread,
+                uppercase: true,
+            }),
+        ];
+
+        Self::new(Kind::Comment, content).tags(tags)
+    }
+
+    /// Web Bookmark
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/B0.md>
+    #[inline]
+    pub fn web_bookmark(web_bookmark: WebBookmark) -> Self {
+        web_bookmark.to_event_builder()
+    }
+}
+
+fn has_nostr_event_uri(content: &str, event_id: &EventId) -> bool {
+    const OPTS: NostrParserOptions = NostrParserOptions::disable_all().nostr_uris(true);
+
+    let parser = NostrParser::new().parse(content).opts(OPTS);
+
+    for token in parser.into_iter() {
+        if let Token::Nostr(nip21) = token {
+            if nip21.event_id().as_ref() == Some(event_id) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]

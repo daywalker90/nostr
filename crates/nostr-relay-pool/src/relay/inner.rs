@@ -5,9 +5,7 @@
 use std::borrow::Cow;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
-#[cfg(feature = "nip11")]
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,9 +37,12 @@ use crate::policy::AdmitStatus;
 use crate::pool::RelayPoolNotification;
 use crate::relay::status::AtomicRelayStatus;
 use crate::shared::SharedState;
-use crate::transport::websocket::{BoxSink, BoxStream};
+use crate::transport::websocket::{WebSocketSink, WebSocketStream};
 
 type ClientMessageJson = String;
+
+// Skip NIP-50 matches since they may create issues and ban non-malicious relays.
+const MATCH_EVENT_OPTS: MatchEventOptions = MatchEventOptions::new().nip50(false);
 
 enum IngesterCommand {
     Authenticate { challenge: String },
@@ -111,10 +112,15 @@ impl RelayChannels {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct SubscriptionData {
-    pub filter: Filter,
+    pub filters: Vec<Filter>,
     pub subscribed_at: Timestamp,
+    pub is_auto_closing: bool,
+    /// Received EOSE msg
+    pub received_eose: bool,
+    /// Number of received events
+    pub received_events: AtomicUsize,
     /// Subscription closed by relay
     pub closed: bool,
 }
@@ -122,9 +128,11 @@ struct SubscriptionData {
 impl Default for SubscriptionData {
     fn default() -> Self {
         Self {
-            // TODO: use `Option<Filter>`?
-            filter: Filter::new(),
+            filters: Vec::new(),
             subscribed_at: Timestamp::zero(),
+            is_auto_closing: false,
+            received_eose: false,
+            received_events: AtomicUsize::new(0),
             closed: false,
         }
     }
@@ -135,10 +143,6 @@ impl Default for SubscriptionData {
 #[derive(Debug)]
 pub(super) struct AtomicPrivateData {
     status: AtomicRelayStatus,
-    #[cfg(feature = "nip11")]
-    pub(super) document: RwLock<RelayInformationDocument>,
-    #[cfg(feature = "nip11")]
-    last_document_fetch: AtomicU64,
     channels: RelayChannels,
     subscriptions: RwLock<HashMap<SubscriptionId, SubscriptionData>>,
     running: AtomicBool,
@@ -171,10 +175,6 @@ impl InnerRelay {
             url,
             atomic: Arc::new(AtomicPrivateData {
                 status: AtomicRelayStatus::default(),
-                #[cfg(feature = "nip11")]
-                document: RwLock::new(RelayInformationDocument::new()),
-                #[cfg(feature = "nip11")]
-                last_document_fetch: AtomicU64::new(0),
                 channels: RelayChannels::new(),
                 subscriptions: RwLock::new(HashMap::new()),
                 running: AtomicBool::new(false),
@@ -289,72 +289,46 @@ impl InnerRelay {
         Ok(())
     }
 
-    #[cfg(feature = "nip11")]
-    fn request_nip11_document(&self) {
-        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
-        let mut opts: Nip11GetOptions =
-            Nip11GetOptions::default().timeout(DEFAULT_CONNECTION_TIMEOUT);
-
-        let allowed: bool = match self.opts.connection_mode {
-            ConnectionMode::Direct => true,
-            #[cfg(not(target_arch = "wasm32"))]
-            ConnectionMode::Proxy(proxy) => {
-                // Update proxy
-                opts.proxy = Some(proxy);
-                true
-            }
-            #[cfg(all(feature = "tor", not(target_arch = "wasm32")))]
-            ConnectionMode::Tor { .. } => false,
-        };
-
-        if allowed {
-            let now: u64 = Timestamp::now().as_u64();
-
-            // Check last fetch
-            if self.atomic.last_document_fetch.load(Ordering::SeqCst) + 3600 < now {
-                // Update last fetch
-                self.atomic.last_document_fetch.store(now, Ordering::SeqCst);
-
-                // Fetch
-                let url = self.url.clone();
-                let atomic = self.atomic.clone();
-                task::spawn(async move {
-                    match RelayInformationDocument::get(url.clone().into(), opts).await {
-                        Ok(document) => {
-                            let mut d = atomic.document.write().await;
-                            *d = document
-                        }
-                        Err(e) => {
-                            tracing::warn!(url = %url, error = %e, "Can't get information document.")
-                        }
-                    };
-                });
-            }
-        }
-    }
-
-    pub async fn subscriptions(&self) -> HashMap<SubscriptionId, Filter> {
+    /// Returns all long-lived (non-auto-closing) subscriptions
+    pub async fn subscriptions(&self) -> HashMap<SubscriptionId, Vec<Filter>> {
         let subscription = self.atomic.subscriptions.read().await;
         subscription
             .iter()
-            .map(|(k, v)| (k.clone(), v.filter.clone()))
+            .filter_map(|(k, v)| (!v.is_auto_closing).then_some((k.clone(), v.filters.clone())))
             .collect()
     }
 
-    pub async fn subscription(&self, id: &SubscriptionId) -> Option<Filter> {
+    pub async fn subscription(&self, id: &SubscriptionId) -> Option<Vec<Filter>> {
         let subscription = self.atomic.subscriptions.read().await;
-        subscription.get(id).map(|d| d.filter.clone())
+        subscription.get(id).map(|d| d.filters.clone())
+    }
+
+    pub(super) async fn remove_subscription(&self, id: &SubscriptionId) {
+        let mut subscriptions = self.atomic.subscriptions.write().await;
+        subscriptions.remove(id);
+    }
+
+    /// Register an auto-closing subscription
+    pub(crate) async fn add_auto_closing_subscription(
+        &self,
+        id: SubscriptionId,
+        filters: Vec<Filter>,
+    ) {
+        let mut subscriptions = self.atomic.subscriptions.write().await;
+        let data: &mut SubscriptionData = subscriptions.entry(id).or_default();
+        data.filters = filters;
+        data.is_auto_closing = true;
     }
 
     pub(crate) async fn update_subscription(
         &self,
         id: SubscriptionId,
-        filter: Filter,
+        filters: Vec<Filter>,
         update_subscribed_at: bool,
     ) {
         let mut subscriptions = self.atomic.subscriptions.write().await;
         let data: &mut SubscriptionData = subscriptions.entry(id).or_default();
-        data.filter = filter;
+        data.filters = filters;
 
         if update_subscribed_at {
             data.subscribed_at = Timestamp::now();
@@ -369,6 +343,14 @@ impl InnerRelay {
         }
     }
 
+    /// Received eose for subscription
+    async fn received_eose(&self, id: &SubscriptionId) {
+        let mut subscriptions = self.atomic.subscriptions.write().await;
+        if let Some(data) = subscriptions.get_mut(id) {
+            data.received_eose = true;
+        }
+    }
+
     /// Check if it should subscribe for current websocket session
     pub(crate) async fn should_resubscribe(&self, id: &SubscriptionId) -> bool {
         let subscriptions = self.atomic.subscriptions.read().await;
@@ -376,6 +358,7 @@ impl InnerRelay {
             Some(SubscriptionData {
                 subscribed_at,
                 closed,
+                is_auto_closing: false,
                 ..
             }) => {
                 // Never subscribed -> SHOULD subscribe
@@ -388,7 +371,12 @@ impl InnerRelay {
                 // Many connections and subscription NOT done in current websocket session -> SHOULD re-subscribe
                 self.stats.connected_at() > *subscribed_at && self.stats.success() > 1
             }
-            None => false,
+            // NOT subscribe if auto-closing subscription or subscription not found
+            Some(SubscriptionData {
+                is_auto_closing: true,
+                ..
+            })
+            | None => false,
         }
     }
 
@@ -462,7 +450,7 @@ impl InnerRelay {
         let subscriptions = self.atomic.subscriptions.read().await;
 
         // No sleep if there are active subscriptions
-        if subscriptions.len() > 0 {
+        if !subscriptions.is_empty() {
             return false;
         }
 
@@ -481,7 +469,7 @@ impl InnerRelay {
             return false;
         }
 
-        let idle_duration_secs: u64 = Timestamp::now().as_u64() - reference_time.as_u64();
+        let idle_duration_secs: u64 = Timestamp::now().as_secs() - reference_time.as_secs();
         let idle_duration: Duration = Duration::from_secs(idle_duration_secs);
         idle_duration >= self.opts.idle_timeout
     }
@@ -515,7 +503,7 @@ impl InnerRelay {
         self.stats.just_woke_up();
     }
 
-    pub(super) fn spawn_connection_task(&self, stream: Option<(BoxSink, BoxStream)>) {
+    pub(super) fn spawn_connection_task(&self, stream: Option<(WebSocketSink, WebSocketStream)>) {
         // Check if the connection task is already running
         // This is checked also later, but it's checked also here to avoid a full-clone if we know that is already running.
         if self.is_running() {
@@ -531,7 +519,7 @@ impl InnerRelay {
     }
 
     /// This **MUST** be called only by the [`InnerRelay::spawn_connection_task`] method!
-    async fn connection_task(self, mut stream: Option<(BoxSink, BoxStream)>) {
+    async fn connection_task(self, mut stream: Option<(WebSocketSink, WebSocketStream)>) {
         // Set the connection task as running and get the previous value.
         let is_running: bool = self.atomic.running.swap(true, Ordering::SeqCst);
 
@@ -671,7 +659,7 @@ impl InnerRelay {
         &self,
         timeout: Duration,
         status_on_failure: RelayStatus,
-    ) -> Result<(BoxSink, BoxStream), Error> {
+    ) -> Result<(WebSocketSink, WebSocketStream), Error> {
         // Update status
         self.set_status(RelayStatus::Connecting, true);
 
@@ -711,7 +699,7 @@ impl InnerRelay {
     /// If `stream` arg is passed, no connection attempt will be done.
     async fn connect_and_run(
         &self,
-        stream: Option<(BoxSink, BoxStream)>,
+        stream: Option<(WebSocketSink, WebSocketStream)>,
         rx_nostr: &mut MutexGuard<'_, Receiver<Vec<ClientMessageJson>>>,
         last_ws_error: &mut Option<String>,
     ) {
@@ -753,14 +741,10 @@ impl InnerRelay {
     /// Run message handlers, pinger and other services
     async fn post_connection(
         &self,
-        mut ws_tx: BoxSink,
-        ws_rx: BoxStream,
+        mut ws_tx: WebSocketSink,
+        ws_rx: WebSocketStream,
         rx_nostr: &mut MutexGuard<'_, Receiver<Vec<ClientMessageJson>>>,
     ) {
-        // Request information document
-        #[cfg(feature = "nip11")]
-        self.request_nip11_document();
-
         // (Re)subscribe to relay
         if self.flags.can_read() {
             if let Err(e) = self.resubscribe().await {
@@ -807,7 +791,7 @@ impl InnerRelay {
 
     async fn sender_message_handler(
         &self,
-        ws_tx: &mut BoxSink,
+        ws_tx: &mut WebSocketSink,
         rx_nostr: &mut MutexGuard<'_, Receiver<Vec<ClientMessageJson>>>,
         ping: &PingTracker,
     ) -> Result<(), Error> {
@@ -879,7 +863,7 @@ impl InnerRelay {
 
     async fn receiver_message_handler(
         &self,
-        mut ws_rx: BoxStream,
+        mut ws_rx: WebSocketStream,
         ping: &PingTracker,
         ingester_tx: mpsc::UnboundedSender<IngesterCommand>,
     ) -> Result<(), Error> {
@@ -1019,40 +1003,10 @@ impl InnerRelay {
         match self.handle_raw_relay_message(msg).await {
             Ok(Some(message)) => {
                 match &message {
-                    RelayMessage::Notice(message) => {
-                        tracing::warn!(url = %self.url, msg = %message, "Received NOTICE.")
-                    }
-                    RelayMessage::Ok {
-                        event_id,
-                        status,
-                        message,
-                    } => {
-                        tracing::debug!(
-                            url = %self.url,
-                            id = %event_id,
-                            status = %status,
-                            msg = %message,
-                            "Received OK."
-                        );
-                    }
-                    RelayMessage::EndOfStoredEvents(id) => {
-                        tracing::debug!(
-                            url = %self.url,
-                            id = %id,
-                            "Received EOSE."
-                        );
-                    }
                     RelayMessage::Closed {
                         subscription_id,
                         message,
                     } => {
-                        tracing::debug!(
-                            url = %self.url,
-                            id = %subscription_id,
-                            msg = %message,
-                            "Subscription closed by relay."
-                        );
-
                         // Check machine-readable prefix
                         let res: HandleClosedMsg = match MachineReadablePrefix::parse(message) {
                             Some(MachineReadablePrefix::Duplicate) => HandleClosedMsg::Remove,
@@ -1080,6 +1034,8 @@ impl InnerRelay {
                             }
                         };
 
+                        // TODO: if auto-closing subscription, just remove it.
+
                         match res {
                             HandleClosedMsg::MarkAsClosed => {
                                 self.subscription_closed(subscription_id).await;
@@ -1091,18 +1047,14 @@ impl InnerRelay {
                                     "Removing subscription."
                                 );
 
-                                let mut subscriptions = self.atomic.subscriptions.write().await;
-                                subscriptions.remove(subscription_id);
+                                self.remove_subscription(subscription_id).await;
                             }
                         }
                     }
+                    RelayMessage::EndOfStoredEvents(id) => {
+                        self.received_eose(id).await;
+                    }
                     RelayMessage::Auth { challenge } => {
-                        tracing::debug!(
-                            url = %self.url,
-                            challenge = %challenge,
-                            "Received auth challenge."
-                        );
-
                         // Check if NIP42 auto authentication is enabled
                         if self.state.is_auto_authentication_enabled() {
                             // Forward action to ingester
@@ -1117,7 +1069,7 @@ impl InnerRelay {
                 // Send notification
                 self.send_notification(RelayNotification::Message { message }, true);
             }
-            Ok(None) | Err(Error::MessageHandle(MessageHandleError::EmptyMsg)) => (),
+            Ok(None) => (),
             Err(e) => tracing::error!(
                 url = %self.url,
                 msg = %msg,
@@ -1131,9 +1083,13 @@ impl InnerRelay {
         &self,
         msg: &str,
     ) -> Result<Option<RelayMessage<'static>>, Error> {
+        // Trim the message (removes leading and trailing whitespaces and line breaks).
+        let msg: &str = msg.trim();
+
+        // Get message size
         let size: usize = msg.len();
 
-        tracing::trace!(url = %self.url, size = %size, msg = %msg, "Received new relay message.");
+        tracing::debug!("Received '{msg}' from '{}' (size: {size} bytes)", self.url);
 
         // Update bytes received
         self.stats.add_bytes_received(size);
@@ -1182,6 +1138,60 @@ impl InnerRelay {
                     size,
                     max_size: max_num_tags,
                 });
+            }
+        }
+
+        // Check if subscription must be verified
+        if self.opts.verify_subscriptions || self.opts.ban_relay_on_mismatch {
+            // NOTE: here we don't use the `self.subscription(id)` to avoid an unnecessary clone of the filter!
+
+            // Acquire read lock
+            let subscriptions = self.atomic.subscriptions.read().await;
+
+            // Check if the subscription id exist and verify if the event matches the subscription filter.
+            let SubscriptionData {
+                filters,
+                received_eose,
+                received_events,
+                ..
+            } = subscriptions
+                .get(&subscription_id)
+                .ok_or(Error::SubscriptionNotFound)?;
+
+            // Check filter limit ONLY if EOSE is not received yet and if there is only ONE filter.
+            // We can't ensure that limit is respected if there is more than one filter.
+            if !received_eose && filters.len() == 1 {
+                // SAFETY: we've checked above that exists one filter.
+                let filter: &Filter = &filters[0];
+
+                // Check if the filter has a limit
+                if let Some(limit) = filter.limit {
+                    // Update number of received events
+                    let prev: usize = received_events.fetch_add(1, Ordering::SeqCst);
+                    let received_events: usize = prev.saturating_add(1);
+
+                    // Check if received more that requested
+                    if received_events > limit {
+                        // Ban the relay
+                        if self.opts.ban_relay_on_mismatch {
+                            self.ban();
+                        }
+
+                        return Err(Error::TooManyEvents);
+                    }
+                }
+            }
+
+            // Check if the filter matches the event
+            for filter in filters.iter() {
+                if !filter.match_event(&event, MATCH_EVENT_OPTS) {
+                    // Ban the relay
+                    if self.opts.ban_relay_on_mismatch {
+                        self.ban();
+                    }
+
+                    return Err(Error::EventNotMatchFilter);
+                }
             }
         }
 
@@ -1404,12 +1414,9 @@ impl InnerRelay {
     pub async fn resubscribe(&self) -> Result<(), Error> {
         // TODO: avoid subscriptions clone
         let subscriptions = self.subscriptions().await;
-        for (id, filter) in subscriptions.into_iter() {
-            if !filter.is_empty() && self.should_resubscribe(&id).await {
-                self.send_msg(ClientMessage::Req {
-                    subscription_id: Cow::Owned(id),
-                    filter: Cow::Owned(filter),
-                })?;
+        for (id, filters) in subscriptions.into_iter() {
+            if !filters.is_empty() && self.should_resubscribe(&id).await {
+                self.send_msg(ClientMessage::req(id, filters))?;
             } else {
                 tracing::debug!("Skip re-subscription of '{id}'");
             }
@@ -1421,7 +1428,7 @@ impl InnerRelay {
     pub(super) fn spawn_auto_closing_handler(
         &self,
         id: SubscriptionId,
-        filter: Filter,
+        filters: Vec<Filter>,
         opts: SubscribeAutoCloseOptions,
         notifications: broadcast::Receiver<RelayNotification>,
         activity: Option<Sender<SubscriptionActivity>>,
@@ -1430,7 +1437,7 @@ impl InnerRelay {
         task::spawn(async move {
             // Check if CLOSE needed
             let to_close: bool = match relay
-                .handle_auto_closing(&id, &filter, opts, notifications, &activity)
+                .handle_auto_closing(&id, &filters, opts, notifications, &activity)
                 .await
             {
                 Some(HandleAutoClosing { to_close, reason }) => {
@@ -1455,19 +1462,24 @@ impl InnerRelay {
             drop(activity);
 
             // Close subscription
-            if to_close {
+            let send_result = if to_close {
                 tracing::debug!(id = %id, "Auto-closing subscription.");
-                relay.send_msg(ClientMessage::Close(Cow::Owned(id)))?;
-            }
+                relay.send_msg(ClientMessage::Close(Cow::Borrowed(&id)))
+            } else {
+                Ok(())
+            };
 
-            Ok::<(), Error>(())
+            // Remove subscription
+            relay.remove_subscription(&id).await;
+
+            send_result
         });
     }
 
     async fn handle_auto_closing(
         &self,
         id: &SubscriptionId,
-        filter: &Filter,
+        filters: &[Filter],
         opts: SubscribeAutoCloseOptions,
         mut notifications: broadcast::Receiver<RelayNotification>,
         activity: &Option<Sender<SubscriptionActivity>>,
@@ -1606,7 +1618,7 @@ impl InnerRelay {
                             require_resubscription = false;
                             let msg = ClientMessage::Req {
                                 subscription_id: Cow::Borrowed(id),
-                                filter: Cow::Borrowed(filter),
+                                filters: filters.iter().map(Cow::Borrowed).collect(),
                             };
                             let _ = self.send_msg(msg);
                         }
@@ -1683,21 +1695,27 @@ impl InnerRelay {
         .await?
     }
 
-    fn _unsubscribe(
+    fn _unsubscribe_long_lived_subscription(
         &self,
         subscriptions: &mut RwLockWriteGuard<HashMap<SubscriptionId, SubscriptionData>>,
-        id: &SubscriptionId,
+        id: Cow<SubscriptionId>,
     ) -> Result<(), Error> {
         // Remove the subscription from the map
-        subscriptions.remove(id);
+        if let Some(sub) = subscriptions.remove(&id) {
+            // Re-insert if auto-closing
+            if sub.is_auto_closing {
+                subscriptions.insert(id.into_owned(), sub);
+                return Ok(());
+            }
+        }
 
         // Send CLOSE message
-        self.send_msg(ClientMessage::Close(Cow::Borrowed(id)))
+        self.send_msg(ClientMessage::Close(id))
     }
 
     pub async fn unsubscribe(&self, id: &SubscriptionId) -> Result<(), Error> {
         let mut subscriptions = self.atomic.subscriptions.write().await;
-        self._unsubscribe(&mut subscriptions, id)
+        self._unsubscribe_long_lived_subscription(&mut subscriptions, Cow::Borrowed(id))
     }
 
     pub async fn unsubscribe_all(&self) -> Result<(), Error> {
@@ -1708,7 +1726,7 @@ impl InnerRelay {
 
         // Unsubscribe
         for id in ids.into_iter() {
-            self._unsubscribe(&mut subscriptions, &id)?;
+            self._unsubscribe_long_lived_subscription(&mut subscriptions, Cow::Owned(id))?;
         }
 
         Ok(())
@@ -1822,7 +1840,7 @@ impl InnerRelay {
     }
 
     #[inline(never)]
-    fn req_neg_events(
+    async fn req_neg_events(
         &self,
         need_ids: &mut Vec<EventId>,
         in_flight_down: &mut bool,
@@ -1858,10 +1876,23 @@ impl InnerRelay {
         }
 
         let filter = Filter::new().ids(ids);
-        self.send_msg(ClientMessage::Req {
+        let msg: ClientMessage = ClientMessage::Req {
             subscription_id: Cow::Borrowed(down_sub_id),
-            filter: Cow::Owned(filter),
-        })?;
+            filters: vec![Cow::Borrowed(&filter)],
+        };
+
+        // Register an auto-closing subscription
+        self.add_auto_closing_subscription(down_sub_id.clone(), vec![filter.clone()])
+            .await;
+
+        // Send msg
+        if let Err(e) = self.send_msg(msg) {
+            // Remove previously added subscription
+            self.remove_subscription(down_sub_id).await;
+
+            // Propagate error
+            return Err(e);
+        }
 
         *in_flight_down = true;
 
@@ -2010,6 +2041,12 @@ impl InnerRelay {
                         RelayMessage::EndOfStoredEvents(id) => {
                             if id.as_ref() == &down_sub_id {
                                 in_flight_down = false;
+
+                                // Remove subscription
+                                self.remove_subscription(&down_sub_id).await;
+
+                                // Close subscription
+                                self.send_msg(ClientMessage::Close(Cow::Borrowed(&down_sub_id)))?;
                             }
                         }
                         RelayMessage::Closed {
@@ -2017,6 +2054,9 @@ impl InnerRelay {
                         } => {
                             if subscription_id.as_ref() == &down_sub_id {
                                 in_flight_down = false;
+
+                                // NOTE: the subscription is removed in the `InnerRelay::handle_relay_message` method,
+                                // so there is no need to try to remove it also here.
                             }
                         }
                         _ => (),
@@ -2027,7 +2067,8 @@ impl InnerRelay {
                         .await?;
 
                     // Get events
-                    self.req_neg_events(&mut need_ids, &mut in_flight_down, &down_sub_id, opts)?;
+                    self.req_neg_events(&mut need_ids, &mut in_flight_down, &down_sub_id, opts)
+                        .await?;
                 }
                 RelayNotification::RelayStatus { status } => {
                     if status.is_disconnected() {
@@ -2057,7 +2098,7 @@ impl InnerRelay {
 }
 
 /// Send WebSocket messages with timeout set to [WEBSOCKET_TX_TIMEOUT].
-async fn send_ws_msgs(tx: &mut BoxSink, msgs: Vec<Message>) -> Result<(), Error> {
+async fn send_ws_msgs(tx: &mut WebSocketSink, msgs: Vec<Message>) -> Result<(), Error> {
     let mut stream = futures_util::stream::iter(msgs.into_iter().map(Ok));
     match time::timeout(Some(WEBSOCKET_TX_TIMEOUT), tx.send_all(&mut stream)).await {
         Some(res) => Ok(res?),
@@ -2066,7 +2107,7 @@ async fn send_ws_msgs(tx: &mut BoxSink, msgs: Vec<Message>) -> Result<(), Error>
 }
 
 /// Send WebSocket messages with timeout set to [WEBSOCKET_TX_TIMEOUT].
-async fn close_ws(tx: &mut BoxSink) -> Result<(), Error> {
+async fn close_ws(tx: &mut WebSocketSink) -> Result<(), Error> {
     // TODO: remove timeout from here?
     match time::timeout(Some(WEBSOCKET_TX_TIMEOUT), tx.close()).await {
         Some(res) => Ok(res?),
@@ -2088,7 +2129,7 @@ fn prepare_negentropy_storage(
     // Add items
     for (id, timestamp) in items.into_iter() {
         let id: Id = Id::from_byte_array(id.to_bytes());
-        storage.insert(timestamp.as_u64(), id)?;
+        storage.insert(timestamp.as_secs(), id)?;
     }
 
     // Seal

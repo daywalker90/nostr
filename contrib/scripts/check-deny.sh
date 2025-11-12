@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -euo pipefail
+set -exuo pipefail
 
 # Install cargo-deny
 cargo deny --version || cargo install cargo-deny

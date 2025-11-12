@@ -32,6 +32,19 @@ impl<'a> CowTag<'a> {
         Ok(Self { buf: tag })
     }
 
+    /// Get the tag kind
+    #[inline]
+    pub fn kind(&self) -> &str {
+        // SAFETY: we checked that buf is not empty
+        self.buf[0].as_ref()
+    }
+
+    /// Return the **first** tag value (index `1`), if exists.
+    #[inline]
+    pub fn content(&self) -> Option<&str> {
+        self.buf.get(1).map(|s| s.as_ref())
+    }
+
     /// Extract tag name and value
     pub fn extract(&self) -> Option<(SingleLetterTag, &str)> {
         if self.buf.len() >= 2 {
@@ -53,5 +66,13 @@ impl<'a> CowTag<'a> {
     #[inline]
     pub fn into_inner(self) -> Vec<Cow<'a, str>> {
         self.buf
+    }
+}
+
+impl<'a> From<&'a Tag> for CowTag<'a> {
+    fn from(tag: &'a Tag) -> Self {
+        Self {
+            buf: tag.buf.iter().map(|v| Cow::Borrowed(v.as_str())).collect(),
+        }
     }
 }

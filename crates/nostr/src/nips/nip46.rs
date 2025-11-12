@@ -28,7 +28,7 @@ pub const NOSTR_CONNECT_URI_SCHEME: &str = "nostrconnect";
 pub const NOSTR_CONNECT_BUNKER_URI_SCHEME: &str = "bunker";
 
 /// NIP46 error
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
     /// Key error
     Key(key::Error),
@@ -48,14 +48,17 @@ pub enum Error {
     UnsupportedMethod(String),
     /// Invalid URI
     InvalidURI,
-    /// Invalid URI scheme
-    InvalidURIScheme,
     /// Not a request
     NotRequest,
-    /// Not a response
-    NotResponse,
     /// Unexpected result
-    UnexpectedResult,
+    UnexpectedResponse {
+        /// Request method
+        method: NostrConnectMethod,
+        /// Expected response
+        expected: String,
+        /// Received response
+        received: String,
+    },
 }
 
 #[cfg(feature = "std")]
@@ -64,19 +67,24 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Key(e) => write!(f, "{e}"),
-            Self::Json(e) => write!(f, "{e}"),
-            Self::RelayUrl(e) => write!(f, "{e}"),
-            Self::Url(e) => write!(f, "{e}"),
-            Self::Event(e) => write!(f, "{e}"),
-            Self::InvalidRequest => write!(f, "Invalid request"),
-            Self::InvalidParamsLength => write!(f, "Invalid params len"),
+            Self::Key(e) => e.fmt(f),
+            Self::Json(e) => e.fmt(f),
+            Self::RelayUrl(e) => e.fmt(f),
+            Self::Url(e) => e.fmt(f),
+            Self::Event(e) => e.fmt(f),
+            Self::InvalidRequest => f.write_str("Invalid request"),
+            Self::InvalidParamsLength => f.write_str("Invalid params len"),
             Self::UnsupportedMethod(name) => write!(f, "Unsupported method: {name}"),
-            Self::InvalidURI => write!(f, "Invalid uri"),
-            Self::InvalidURIScheme => write!(f, "Invalid uri scheme"),
-            Self::NotRequest => write!(f, "Not a request"),
-            Self::NotResponse => write!(f, "Not a response"),
-            Self::UnexpectedResult => write!(f, "Unexpected result"),
+            Self::InvalidURI => f.write_str("Invalid uri"),
+            Self::NotRequest => f.write_str("Not a request"),
+            Self::UnexpectedResponse {
+                method,
+                received,
+                expected,
+            } => write!(
+                f,
+                "Unexpected response: method={method}, expected={received}, received={expected}"
+            ),
         }
     }
 }
@@ -189,8 +197,8 @@ impl<'de> Deserialize<'de> for NostrConnectMethod {
 pub enum NostrConnectRequest {
     /// Connect
     Connect {
-        /// Remote public key
-        public_key: PublicKey,
+        /// Remote signer public key
+        remote_signer_public_key: PublicKey,
         /// Optional secret
         secret: Option<String>,
     },
@@ -235,10 +243,15 @@ impl NostrConnectRequest {
     pub fn from_message(method: NostrConnectMethod, params: Vec<String>) -> Result<Self, Error> {
         match method {
             NostrConnectMethod::Connect => {
-                let public_key = params.first().ok_or(Error::InvalidRequest)?;
-                let public_key: PublicKey = PublicKey::from_hex(public_key)?;
+                let remote_signer_public_key: &String =
+                    params.first().ok_or(Error::InvalidRequest)?;
+                let remote_signer_public_key: PublicKey =
+                    PublicKey::from_hex(remote_signer_public_key)?;
                 let secret: Option<String> = params.get(1).cloned();
-                Ok(Self::Connect { public_key, secret })
+                Ok(Self::Connect {
+                    remote_signer_public_key,
+                    secret,
+                })
             }
             NostrConnectMethod::GetPublicKey => Ok(Self::GetPublicKey),
             NostrConnectMethod::SignEvent => {
@@ -307,8 +320,11 @@ impl NostrConnectRequest {
     /// Get req params
     pub fn params(&self) -> Vec<String> {
         match self {
-            Self::Connect { public_key, secret } => {
-                let mut params = vec![public_key.to_hex()];
+            Self::Connect {
+                remote_signer_public_key,
+                secret,
+            } => {
+                let mut params = vec![remote_signer_public_key.to_hex()];
                 if let Some(secret) = secret {
                     params.push(secret.to_owned());
                 }
@@ -471,7 +487,11 @@ impl ResponseResult {
                 if response == "ack" {
                     Ok(Self::Ack)
                 } else {
-                    Err(Error::UnexpectedResult)
+                    Err(Error::UnexpectedResponse {
+                        method,
+                        expected: String::from("ack"),
+                        received: response,
+                    })
                 }
             }
             NostrConnectMethod::GetPublicKey => {
@@ -496,7 +516,11 @@ impl ResponseResult {
                 if response == "pong" {
                     Ok(Self::Pong)
                 } else {
-                    Err(Error::UnexpectedResult)
+                    Err(Error::UnexpectedResponse {
+                        method,
+                        expected: String::from("pong"),
+                        received: response,
+                    })
                 }
             }
         }
@@ -517,7 +541,11 @@ impl ResponseResult {
         if let Self::Ack = self {
             Ok(())
         } else {
-            Err(Error::UnexpectedResult)
+            Err(Error::UnexpectedResponse {
+                method: NostrConnectMethod::Connect,
+                expected: String::from("ack"),
+                received: self.to_string(),
+            })
         }
     }
 
@@ -526,7 +554,11 @@ impl ResponseResult {
         if let Self::GetPublicKey(val) = self {
             Ok(val)
         } else {
-            Err(Error::UnexpectedResult)
+            Err(Error::UnexpectedResponse {
+                method: NostrConnectMethod::GetPublicKey,
+                expected: String::from("user public key"),
+                received: self.to_string(),
+            })
         }
     }
 
@@ -535,7 +567,11 @@ impl ResponseResult {
         if let Self::SignEvent(val) = self {
             Ok(*val)
         } else {
-            Err(Error::UnexpectedResult)
+            Err(Error::UnexpectedResponse {
+                method: NostrConnectMethod::SignEvent,
+                expected: String::from("signed event"),
+                received: self.to_string(),
+            })
         }
     }
 
@@ -544,7 +580,11 @@ impl ResponseResult {
         if let Self::Nip04Encrypt { ciphertext } = self {
             Ok(ciphertext)
         } else {
-            Err(Error::UnexpectedResult)
+            Err(Error::UnexpectedResponse {
+                method: NostrConnectMethod::Nip04Encrypt,
+                expected: String::from("NIP-04 encrypted text"),
+                received: self.to_string(),
+            })
         }
     }
 
@@ -553,7 +593,11 @@ impl ResponseResult {
         if let Self::Nip04Decrypt { plaintext } = self {
             Ok(plaintext)
         } else {
-            Err(Error::UnexpectedResult)
+            Err(Error::UnexpectedResponse {
+                method: NostrConnectMethod::Nip04Decrypt,
+                expected: String::from("NIP-04 decrypted text"),
+                received: self.to_string(),
+            })
         }
     }
 
@@ -562,7 +606,11 @@ impl ResponseResult {
         if let Self::Nip44Encrypt { ciphertext } = self {
             Ok(ciphertext)
         } else {
-            Err(Error::UnexpectedResult)
+            Err(Error::UnexpectedResponse {
+                method: NostrConnectMethod::Nip44Encrypt,
+                expected: String::from("NIP-44 encrypted text"),
+                received: self.to_string(),
+            })
         }
     }
 
@@ -571,7 +619,11 @@ impl ResponseResult {
         if let Self::Nip44Decrypt { plaintext } = self {
             Ok(plaintext)
         } else {
-            Err(Error::UnexpectedResult)
+            Err(Error::UnexpectedResponse {
+                method: NostrConnectMethod::Nip44Decrypt,
+                expected: String::from("NIP-44 decrypted text"),
+                received: self.to_string(),
+            })
         }
     }
 
@@ -580,7 +632,11 @@ impl ResponseResult {
         if let Self::Pong = self {
             Ok(())
         } else {
-            Err(Error::UnexpectedResult)
+            Err(Error::UnexpectedResponse {
+                method: NostrConnectMethod::Ping,
+                expected: String::from("pong"),
+                received: self.to_string(),
+            })
         }
     }
 }
@@ -638,7 +694,7 @@ impl NostrConnectMessage {
         }
     }
 
-    /// Compose [`NostrConnectMessage::Response`] from [`Response`].
+    /// Compose [`NostrConnectMessage::Response`] from [`NostrConnectResponse`].
     #[inline]
     pub fn response<S>(req_id: S, res: NostrConnectResponse) -> Self
     where
@@ -651,7 +707,7 @@ impl NostrConnectMessage {
         }
     }
 
-    /// Get [`Message`] id
+    /// Get [`NostrConnectMessage`] id
     #[inline]
     pub fn id(&self) -> &str {
         match self {
@@ -660,19 +716,19 @@ impl NostrConnectMessage {
         }
     }
 
-    /// Check if the current [`Message`] is a request.
+    /// Check if the current [`NostrConnectMessage`] is a request.
     #[inline]
     pub fn is_request(&self) -> bool {
         matches!(self, Self::Request { .. })
     }
 
-    /// Check if the current [`Message`] is a response.
+    /// Check if the current [`NostrConnectMessage`] is a response.
     #[inline]
     pub fn is_response(&self) -> bool {
         matches!(self, Self::Response { .. })
     }
 
-    /// Convert [`NostrConnectMessage::Request`] to [`Request`].
+    /// Convert [`NostrConnectMessage::Request`] to [`NostrConnectRequest`].
     #[inline]
     pub fn to_request(self) -> Result<NostrConnectRequest, Error> {
         match self {
@@ -683,7 +739,7 @@ impl NostrConnectMessage {
         }
     }
 
-    /// Convert [`NostrConnectMessage::Response`] to [`Response`].
+    /// Convert [`NostrConnectMessage::Response`] to [`NostrConnectResponse`].
     #[inline]
     pub fn to_response(self, method: NostrConnectMethod) -> Result<NostrConnectResponse, Error> {
         match self {
@@ -870,7 +926,7 @@ impl NostrConnectURI {
 
                 Err(Error::InvalidURI)
             }
-            _ => Err(Error::InvalidURIScheme),
+            _ => Err(Error::InvalidURI),
         }
     }
 
@@ -1072,7 +1128,14 @@ mod test {
         assert_eq!(res, ResponseResult::Ack);
 
         let res = ResponseResult::parse(NostrConnectMethod::Ping, "ack");
-        assert_eq!(res.unwrap_err(), Error::UnexpectedResult);
+        assert_eq!(
+            res.unwrap_err(),
+            Error::UnexpectedResponse {
+                method: NostrConnectMethod::Ping,
+                expected: String::from("pong"),
+                received: String::from("ack"),
+            }
+        );
 
         let res: ResponseResult = ResponseResult::parse(
             NostrConnectMethod::GetPublicKey,
@@ -1135,7 +1198,7 @@ mod test {
         assert_eq!(
             req,
             NostrConnectRequest::Connect {
-                public_key: PublicKey::from_hex(
+                remote_signer_public_key: PublicKey::from_hex(
                     "79dff8f82963424e0bb02708a22e44b4980893e3a4be0fa3cb60a43b946764e3"
                 )
                 .unwrap(),

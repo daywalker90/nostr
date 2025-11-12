@@ -1,6 +1,6 @@
 [package]
 name = "nostr-sdk"
-version = "0.42.0"
+version = "0.44.0"
 edition = "2021"
 description = "High level Nostr client library."
 authors.workspace = true
@@ -18,16 +18,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = []
 tor = ["nostr-relay-pool/tor"]
-lmdb = ["dep:nostr-lmdb"]
-ndb = ["dep:nostr-ndb"]
-indexeddb = ["dep:nostr-indexeddb"]
-all-nips = ["nostr/all-nips", "nip04", "nip05", "nip06", "nip07", "nip11", "nip44", "nip47", "nip49", "nip57", "nip59", "nip96", "nip98"]
+pow-multi-thread = ["nostr/pow-multi-thread"]
+all-nips = ["nostr/all-nips", "nip04", "nip06", "nip44", "nip47", "nip49", "nip57", "nip59", "nip96", "nip98"]
 nip03 = ["nostr/nip03"]
 nip04 = ["nostr/nip04"]
-nip05 = ["nostr/nip05"]
 nip06 = ["nostr/nip06"]
-nip07 = ["nostr/nip07"]
-nip11 = ["nostr/nip11", "nostr-relay-pool/nip11"]
 nip44 = ["nostr/nip44"]
 nip47 = ["nostr/nip47"]
 nip49 = ["nostr/nip49"]
@@ -40,25 +35,21 @@ nip98 = ["nostr/nip98"]
 async-utility.workspace = true
 nostr = { workspace = true, features = ["std"] }
 nostr-database.workspace = true
+nostr-gossip.workspace = true
 nostr-relay-pool.workspace = true
 tokio = { workspace = true, features = ["sync"] }
-tracing = { workspace = true, features = ["std", "attributes"] }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-nostr-lmdb = { workspace = true, optional = true }
-nostr-ndb = { workspace = true, optional = true }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-nostr-indexeddb = { workspace = true, optional = true }
+tracing = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 nostr-connect.workspace = true
+nostr-lmdb.workspace = true
+nostr-ndb.workspace = true
+nostr-gossip-memory.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [[example]]
 name = "aggregated-query"
-required-features = ["lmdb"]
 
 [[example]]
 name = "blacklist"
@@ -89,7 +80,6 @@ required-features = ["all-nips"]
 
 [[example]]
 name = "nostrdb"
-required-features = ["ndb"]
 
 [[example]]
 name = "stream-events"
@@ -106,7 +96,6 @@ required-features = ["nip59", "tor"]
 
 [[example]]
 name = "lmdb"
-required-features = ["lmdb"]
 
 [[example]]
 name = "whitelist"

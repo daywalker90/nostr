@@ -17,14 +17,13 @@ use super::{Error, TagKind};
 use crate::event::id::EventId;
 use crate::nips::nip01::Coordinate;
 use crate::nips::nip10::Marker;
-use crate::nips::nip26::Conditions;
 use crate::nips::nip34::EUC;
 use crate::nips::nip39::Identity;
 use crate::nips::nip48::Protocol;
 use crate::nips::nip53::{LiveEventMarker, LiveEventStatus};
 use crate::nips::nip56::Report;
 use crate::nips::nip65::RelayMetadata;
-use crate::nips::nip73::ExternalContentId;
+use crate::nips::nip73::{ExternalContentId, Nip73Kind};
 use crate::nips::nip88::{self, PollOption, PollType};
 use crate::nips::nip90::DataVendingMachineStatus;
 #[cfg(feature = "nip98")]
@@ -35,8 +34,10 @@ use crate::{
 };
 
 const ALL_RELAYS: &str = "ALL_RELAYS";
+const GIT_REFS_HEADS: &str = "ref: refs/heads/";
 
 /// Standardized tag
+#[allow(deprecated)]
 #[allow(missing_docs)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TagStandard {
@@ -61,10 +62,21 @@ pub enum TagStandard {
         /// Should be the public key of the author of the referenced event
         public_key: Option<PublicKey>,
     },
+    /// Quote address
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/22.md>
+    QuoteAddress {
+        coordinate: Coordinate,
+        relay_url: Option<RelayUrl>,
+    },
     /// Report event
     ///
     /// <https://github.com/nostr-protocol/nips/blob/master/56.md>
     EventReport(EventId, Report),
+    /// Git head ([`TagKind::Head`] tag)
+    ///
+    /// <https://github.com/nostr-protocol/nips/blob/master/34.md>
+    GitHead(String),
     /// Git clone ([`TagKind::Clone`] tag)
     ///
     /// <https://github.com/nostr-protocol/nips/blob/master/34.md>
@@ -137,6 +149,11 @@ pub enum TagStandard {
         /// Whether the tag is an uppercase or not
         uppercase: bool,
     },
+    Nip73Kind {
+        kind: Nip73Kind,
+        /// Whether the tag is an uppercase or not
+        uppercase: bool,
+    },
     Relay(RelayUrl),
     Relays(Vec<RelayUrl>),
     /// All relays tag
@@ -174,11 +191,6 @@ pub enum TagStandard {
         name: String,
         /// Client address and optional hint
         address: Option<(Coordinate, Option<RelayUrl>)>,
-    },
-    Delegation {
-        delegator: PublicKey,
-        conditions: Conditions,
-        sig: Signature,
     },
     ContentWarning {
         reason: Option<String>,
@@ -366,6 +378,13 @@ impl TagStandard {
                 } => {
                     return parse_t_tag(tag);
                 }
+                // Parse `k` tag
+                SingleLetterTag {
+                    character: Alphabet::K,
+                    uppercase,
+                } => {
+                    return parse_k_tag(tag, uppercase);
+                }
                 _ => (), // Covered later
             },
             TagKind::Anon => {
@@ -383,7 +402,6 @@ impl TagStandard {
                     reason: extract_optional_string(tag, 1).map(|s| s.to_string()),
                 })
             }
-            TagKind::Delegation => return parse_delegation_tag(tag),
             TagKind::Encrypted => return Ok(Self::Encrypted),
             TagKind::Maintainers => {
                 let public_keys: Vec<PublicKey> = extract_public_keys(tag)?;
@@ -445,6 +463,7 @@ impl TagStandard {
                 TagKind::Repository => Ok(Self::Repository(tag_1.to_string())),
                 TagKind::Subject => Ok(Self::Subject(tag_1.to_string())),
                 TagKind::Challenge => Ok(Self::Challenge(tag_1.to_string())),
+                TagKind::Head => Ok(Self::GitHead(tag_1.to_string())),
                 TagKind::Commit => Ok(Self::GitCommit(Sha1Hash::from_str(tag_1)?)),
                 TagKind::Title => Ok(Self::Title(tag_1.to_string())),
                 TagKind::Image => Ok(Self::Image(Url::parse(tag_1)?, None)),
@@ -585,11 +604,14 @@ impl TagStandard {
                 character: Alphabet::E,
                 uppercase: *uppercase,
             }),
-            Self::Quote { .. } => TagKind::SingleLetter(SingleLetterTag {
-                character: Alphabet::Q,
-                uppercase: false,
-            }),
+            Self::Quote { .. } | Self::QuoteAddress { .. } => {
+                TagKind::SingleLetter(SingleLetterTag {
+                    character: Alphabet::Q,
+                    uppercase: false,
+                })
+            }
             Self::EventReport(..) => TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::E)),
+            Self::GitHead(..) => TagKind::Head,
             Self::GitClone(..) => TagKind::Clone,
             Self::GitCommit(..) => TagKind::Commit,
             Self::GitEarliestUniqueCommitId(..) => {
@@ -636,10 +658,12 @@ impl TagStandard {
                 character: Alphabet::A,
                 uppercase: *uppercase,
             }),
-            Self::Kind { uppercase, .. } => TagKind::SingleLetter(SingleLetterTag {
-                character: Alphabet::K,
-                uppercase: *uppercase,
-            }),
+            Self::Kind { uppercase, .. } | Self::Nip73Kind { uppercase, .. } => {
+                TagKind::SingleLetter(SingleLetterTag {
+                    character: Alphabet::K,
+                    uppercase: *uppercase,
+                })
+            }
             Self::Relay(..) | Self::AllRelays => TagKind::Relay,
             Self::PollEndsAt(..) => nip88::ENDS_AT_TAG_KIND,
             Self::PollOption { .. } => TagKind::Option,
@@ -647,7 +671,6 @@ impl TagStandard {
             Self::PollType(..) => TagKind::PollType,
             Self::POW { .. } => TagKind::Nonce,
             Self::Client { .. } => TagKind::Client,
-            Self::Delegation { .. } => TagKind::Delegation,
             Self::ContentWarning { .. } => TagKind::ContentWarning,
             Self::Expiration(..) => TagKind::Expiration,
             Self::Subject(..) => TagKind::Subject,
@@ -776,6 +799,16 @@ impl From<TagStandard> for Vec<String> {
                 }
                 tag
             }
+            TagStandard::QuoteAddress {
+                coordinate,
+                relay_url,
+            } => {
+                let mut tag = vec![tag_kind, coordinate.to_string()];
+                if let Some(relay_url) = relay_url {
+                    tag.push(relay_url.to_string());
+                }
+                tag
+            }
             TagStandard::PublicKey {
                 public_key,
                 relay_url,
@@ -794,6 +827,9 @@ impl From<TagStandard> for Vec<String> {
             }
             TagStandard::EventReport(id, report) => {
                 vec![tag_kind, id.to_hex(), report.to_string()]
+            }
+            TagStandard::GitHead(branch) => {
+                vec![tag_kind, format!("{GIT_REFS_HEADS}{branch}")]
             }
             TagStandard::GitClone(urls) => {
                 let mut tag: Vec<String> = Vec::with_capacity(1 + urls.len());
@@ -871,6 +907,7 @@ impl From<TagStandard> for Vec<String> {
                 vec![tag_kind, identity.tag_platform_identity(), identity.proof]
             }
             TagStandard::Kind { kind, .. } => vec![tag_kind, kind.to_string()],
+            TagStandard::Nip73Kind { kind, .. } => vec![tag_kind, kind.to_string()],
             TagStandard::Relay(url) => vec![tag_kind, url.to_string()],
             TagStandard::AllRelays => vec![tag_kind, ALL_RELAYS.to_string()],
             TagStandard::PollEndsAt(ends_at) => vec![tag_kind, ends_at.to_string()],
@@ -897,16 +934,6 @@ impl From<TagStandard> for Vec<String> {
 
                 tag
             }
-            TagStandard::Delegation {
-                delegator,
-                conditions,
-                sig,
-            } => vec![
-                tag_kind,
-                delegator.to_string(),
-                conditions.to_string(),
-                sig.to_string(),
-            ],
             TagStandard::ContentWarning { reason } => {
                 let mut tag = vec![tag_kind];
                 if let Some(reason) = reason {
@@ -1334,26 +1361,34 @@ where
         return Err(Error::UnknownStandardizedTag);
     }
 
-    let event_id: EventId = EventId::from_hex(tag[1].as_ref())?;
-
+    let tag_1 = tag[1].as_ref();
     let tag_2: Option<&str> = tag.get(2).map(|r| r.as_ref());
-    let tag_3: Option<&str> = tag.get(3).map(|r| r.as_ref());
 
     let relay_url: Option<RelayUrl> = match tag_2 {
         Some(url) if !url.is_empty() => Some(RelayUrl::parse(url)?),
         _ => None,
     };
 
-    let public_key: Option<PublicKey> = match tag_3 {
-        Some(public_key) => Some(PublicKey::from_hex(public_key)?),
-        None => None,
-    };
+    match EventId::from_hex(tag_1) {
+        Ok(event_id) => {
+            let tag_3: Option<&str> = tag.get(3).map(|r| r.as_ref());
 
-    Ok(TagStandard::Quote {
-        event_id,
-        relay_url,
-        public_key,
-    })
+            let public_key: Option<PublicKey> = match tag_3 {
+                Some(public_key) => Some(PublicKey::from_hex(public_key)?),
+                None => None,
+            };
+
+            Ok(TagStandard::Quote {
+                event_id,
+                relay_url,
+                public_key,
+            })
+        }
+        Err(_) => Ok(TagStandard::QuoteAddress {
+            coordinate: Coordinate::from_str(tag_1)?,
+            relay_url,
+        }),
+    }
 }
 
 fn parse_t_tag<S>(tag: &[S]) -> Result<TagStandard, Error>
@@ -1373,6 +1408,27 @@ where
     }
 
     Ok(TagStandard::Hashtag(hashtag.to_string()))
+}
+
+fn parse_k_tag<S>(tag: &[S], uppercase: bool) -> Result<TagStandard, Error>
+where
+    S: AsRef<str>,
+{
+    // ["k", "<kind>"]
+
+    let kind: &str = tag.get(1).ok_or(Error::UnknownStandardizedTag)?.as_ref();
+
+    if let Ok(kind_number) = u16::from_str(kind) {
+        Ok(TagStandard::Kind {
+            kind: Kind::from_u16(kind_number),
+            uppercase,
+        })
+    } else {
+        Ok(TagStandard::Nip73Kind {
+            kind: Nip73Kind::from_str(kind).map_err(|_| Error::UnknownStandardizedTag)?,
+            uppercase,
+        })
+    }
 }
 
 fn parse_client_tag<S>(tag: &[S]) -> Result<TagStandard, Error>
@@ -1418,25 +1474,6 @@ where
         name: tag_1.to_string(),
         address,
     })
-}
-
-fn parse_delegation_tag<S>(tag: &[S]) -> Result<TagStandard, Error>
-where
-    S: AsRef<str>,
-{
-    if tag.len() == 4 {
-        let tag_1: &str = tag[1].as_ref();
-        let tag_2: &str = tag[2].as_ref();
-        let tag_3: &str = tag[3].as_ref();
-
-        Ok(TagStandard::Delegation {
-            delegator: PublicKey::from_hex(tag_1)?,
-            conditions: Conditions::from_str(tag_2)?,
-            sig: Signature::from_str(tag_3)?,
-        })
-    } else {
-        Err(Error::UnknownStandardizedTag)
-    }
 }
 
 #[inline]
@@ -1488,6 +1525,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use alloc::borrow::ToOwned;
+
     use super::*;
     use crate::nips::nip39::ExternalIdentity;
 
@@ -1519,6 +1558,65 @@ mod tests {
             uppercase: false,
         };
         assert!(!tag.is_reply());
+    }
+
+    #[test]
+    fn test_nip73_kind() {
+        let tag = TagStandard::Nip73Kind {
+            kind: Nip73Kind::Url,
+            uppercase: true,
+        };
+        assert_eq!(tag.to_vec(), vec!["K", "web"]);
+
+        let tag = TagStandard::Nip73Kind {
+            kind: Nip73Kind::PodcastEpisode,
+            uppercase: false,
+        };
+        assert_eq!(tag.to_vec(), vec!["k", "podcast:item:guid"]);
+
+        let tag = TagStandard::Nip73Kind {
+            kind: Nip73Kind::BlockchainTransaction("monero".to_owned()),
+            uppercase: false,
+        };
+        assert_eq!(tag.to_vec(), vec!["k", "monero:tx"]);
+
+        let tag = TagStandard::Nip73Kind {
+            kind: Nip73Kind::BlockchainAddress("monero".to_owned()),
+            uppercase: true,
+        };
+        assert_eq!(tag.to_vec(), vec!["K", "monero:address"]);
+
+        assert_eq!(
+            TagStandard::parse(&["k", "isbn"]).unwrap(),
+            TagStandard::Nip73Kind {
+                kind: Nip73Kind::Book,
+                uppercase: false
+            }
+        );
+        assert_eq!(
+            TagStandard::parse(&["K", "monero:address"]).unwrap(),
+            TagStandard::Nip73Kind {
+                kind: Nip73Kind::BlockchainAddress("monero".to_owned()),
+                uppercase: true
+            }
+        );
+    }
+
+    #[test]
+    fn test_kind() {
+        let tag = TagStandard::Kind {
+            kind: Kind::Comment,
+            uppercase: false,
+        };
+        assert_eq!(tag.to_vec(), vec!["k", "1111"]);
+
+        assert_eq!(
+            TagStandard::parse(&["K", "1617"]).unwrap(),
+            TagStandard::Kind {
+                kind: Kind::GitPatch,
+                uppercase: true
+            }
+        );
     }
 
     #[test]
@@ -1617,6 +1715,31 @@ mod tests {
                 ),
             }
             .to_vec()
+        );
+
+        assert_eq!(
+            vec![
+                "q",
+                "30023:3c9849383bdea883b0bd16fece1ed36d37e37cdde3ce43b17ea4e9192ec11289:f9347ca7",
+            ],
+            TagStandard::QuoteAddress {
+                coordinate: Coordinate::from_str("30023:3c9849383bdea883b0bd16fece1ed36d37e37cdde3ce43b17ea4e9192ec11289:f9347ca7").unwrap(),
+                relay_url: None,
+            }
+                .to_vec()
+        );
+
+        assert_eq!(
+            vec![
+                "q",
+                "30023:3c9849383bdea883b0bd16fece1ed36d37e37cdde3ce43b17ea4e9192ec11289:f9347ca7",
+                "wss://relay.damus.io"
+            ],
+            TagStandard::QuoteAddress {
+                coordinate: Coordinate::from_str("30023:3c9849383bdea883b0bd16fece1ed36d37e37cdde3ce43b17ea4e9192ec11289:f9347ca7").unwrap(),
+                relay_url: Some(RelayUrl::parse("wss://relay.damus.io").unwrap()),
+            }
+                .to_vec()
         );
 
         assert_eq!(
@@ -2002,19 +2125,6 @@ mod tests {
         assert_eq!(vec!["relay", "ALL_RELAYS"], TagStandard::AllRelays.to_vec());
 
         assert_eq!(
-            vec![
-                "delegation",
-                "13adc511de7e1cfcf1c6b7f6365fb5a03442d7bcacf565ea57fa7770912c023d",
-                "kind=1",
-                "fd0954de564cae9923c2d8ee9ab2bf35bc19757f8e328a978958a2fcc950eaba0754148a203adec29b7b64080d0cf5a32bebedd768ea6eb421a6b751bb4584a8",
-            ],
-            TagStandard::Delegation {
-                delegator: PublicKey::from_str(
-                "13adc511de7e1cfcf1c6b7f6365fb5a03442d7bcacf565ea57fa7770912c023d"
-            ).unwrap(), conditions: Conditions::from_str("kind=1").unwrap(), sig: Signature::from_str("fd0954de564cae9923c2d8ee9ab2bf35bc19757f8e328a978958a2fcc950eaba0754148a203adec29b7b64080d0cf5a32bebedd768ea6eb421a6b751bb4584a8").unwrap() }.to_vec()
-        );
-
-        assert_eq!(
             vec!["lnurl", "lnurl1dp68gurn8ghj7um5v93kketj9ehx2amn9uh8wetvdskkkmn0wahz7mrww4excup0dajx2mrv92x9xp"],
             TagStandard::Lnurl(String::from("lnurl1dp68gurn8ghj7um5v93kketj9ehx2amn9uh8wetvdskkkmn0wahz7mrww4excup0dajx2mrv92x9xp")).to_vec(),
         );
@@ -2248,6 +2358,29 @@ mod tests {
                     )
                     .unwrap()
                 ),
+            }
+        );
+
+        assert_eq!(
+            TagStandard::parse(&[
+                "q",
+                "30023:3c9849383bdea883b0bd16fece1ed36d37e37cdde3ce43b17ea4e9192ec11289:f9347ca7",
+            ]).unwrap(),
+            TagStandard::QuoteAddress {
+                coordinate: Coordinate::from_str("30023:3c9849383bdea883b0bd16fece1ed36d37e37cdde3ce43b17ea4e9192ec11289:f9347ca7").unwrap(),
+                relay_url: None,
+            }
+        );
+
+        assert_eq!(
+            TagStandard::parse(&[
+                "q",
+                "30023:3c9849383bdea883b0bd16fece1ed36d37e37cdde3ce43b17ea4e9192ec11289:f9347ca7",
+                "wss://relay.damus.io"
+            ]).unwrap(),
+            TagStandard::QuoteAddress {
+                coordinate: Coordinate::from_str("30023:3c9849383bdea883b0bd16fece1ed36d37e37cdde3ce43b17ea4e9192ec11289:f9347ca7").unwrap(),
+                relay_url: Some(RelayUrl::parse("wss://relay.damus.io").unwrap()),
             }
         );
 
@@ -2684,18 +2817,6 @@ mod tests {
                 ),
                 uppercase: false,
             }
-        );
-
-        assert_eq!(
-            TagStandard::parse(&[
-                "delegation",
-                "13adc511de7e1cfcf1c6b7f6365fb5a03442d7bcacf565ea57fa7770912c023d",
-                "kind=1",
-                "fd0954de564cae9923c2d8ee9ab2bf35bc19757f8e328a978958a2fcc950eaba0754148a203adec29b7b64080d0cf5a32bebedd768ea6eb421a6b751bb4584a8",
-            ]).unwrap(),
-            TagStandard::Delegation { delegator: PublicKey::from_str(
-                "13adc511de7e1cfcf1c6b7f6365fb5a03442d7bcacf565ea57fa7770912c023d"
-            ).unwrap(), conditions: Conditions::from_str("kind=1").unwrap(), sig: Signature::from_str("fd0954de564cae9923c2d8ee9ab2bf35bc19757f8e328a978958a2fcc950eaba0754148a203adec29b7b64080d0cf5a32bebedd768ea6eb421a6b751bb4584a8").unwrap() }
         );
 
         assert_eq!(

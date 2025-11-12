@@ -5,6 +5,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_utility::futures_util::stream::{self, SplitSink};
@@ -15,10 +16,12 @@ use negentropy::{Id, Negentropy, NegentropyStorageVector};
 use nostr_database::prelude::*;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, Notify, Semaphore};
+use tokio::sync::{broadcast, Notify, OnceCell, Semaphore};
 
 use super::session::{Nip42Session, RateLimiterResponse, Session, Tokens};
 use super::util;
+#[cfg(feature = "tor")]
+use crate::builder::RelayBuilderHiddenService;
 use crate::builder::{
     PolicyResult, QueryPolicy, RateLimit, RelayBuilder, RelayBuilderMode, RelayBuilderNip42,
     RelayTestOptions, WritePolicy,
@@ -26,10 +29,12 @@ use crate::builder::{
 use crate::error::Error;
 
 type WsTx<S> = SplitSink<WebSocketStream<S>, Message>;
+const P_TAG: SingleLetterTag = SingleLetterTag::lowercase(Alphabet::P);
 
 #[derive(Debug, Clone)]
 pub(super) struct InnerLocalRelay {
-    addr: SocketAddr,
+    ip: IpAddr,
+    addr: OnceCell<SocketAddr>,
     database: Arc<dyn NostrDatabase>,
     shutdown: Arc<Notify>,
     /// Channel to notify new event received
@@ -39,13 +44,20 @@ pub(super) struct InnerLocalRelay {
     mode: RelayBuilderMode,
     rate_limit: RateLimit,
     connections_limit: Arc<Semaphore>,
+    max_subid_length: usize,
+    max_filter_limit: Option<usize>,
+    default_filter_limit: usize,
+    auth_dm: bool,
     min_pow: Option<u8>, // TODO: use AtomicU8 to allow to change it?
     #[cfg(feature = "tor")]
-    hidden_service: Option<String>,
+    tor: Option<RelayBuilderHiddenService>,
+    #[cfg(feature = "tor")]
+    hidden_service: OnceCell<Option<String>>,
     write_policy: Vec<Arc<dyn WritePolicy>>,
     query_policy: Vec<Arc<dyn QueryPolicy>>,
     nip42: Option<RelayBuilderNip42>,
     test: RelayTestOptions,
+    running: Arc<AtomicBool>,
 }
 
 impl AtomicDestroyer for InnerLocalRelay {
@@ -55,35 +67,16 @@ impl AtomicDestroyer for InnerLocalRelay {
 }
 
 impl InnerLocalRelay {
-    pub async fn new(builder: RelayBuilder) -> Result<Self, Error> {
+    pub fn new(builder: RelayBuilder) -> Self {
         // TODO: check if configured memory database with events option disabled
 
         // Get IP
         let ip: IpAddr = builder.addr.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
 
-        // Get port
-        let port: u16 = match builder.port {
-            Some(port) => port,
-            None => util::find_available_port().await,
-        };
-
         // Compose local address
-        let addr: SocketAddr = SocketAddr::new(ip, port);
-
-        // If enabled, launch tor hidden service
-        #[cfg(feature = "tor")]
-        let hidden_service: Option<String> = match builder.tor {
-            Some(opts) => {
-                let service = native::tor::launch_onion_service(
-                    opts.nickname,
-                    addr,
-                    80,
-                    opts.custom_path.as_ref(),
-                )
-                .await?;
-                service.onion_name().map(|n| format!("ws://{n}"))
-            }
-            None => None,
+        let addr: OnceCell<SocketAddr> = match builder.port {
+            Some(port) => OnceCell::from(SocketAddr::new(ip, port)),
+            None => OnceCell::new(),
         };
 
         // Channels
@@ -92,7 +85,8 @@ impl InnerLocalRelay {
         let max_connections: usize = builder.max_connections.unwrap_or(Semaphore::MAX_PERMITS);
 
         // Compose relay
-        Ok(Self {
+        Self {
+            ip,
             addr,
             database: builder.database,
             shutdown: Arc::new(Notify::new()),
@@ -100,28 +94,48 @@ impl InnerLocalRelay {
             mode: builder.mode,
             rate_limit: builder.rate_limit,
             connections_limit: Arc::new(Semaphore::new(max_connections)),
+            max_subid_length: builder.max_subid_length,
+            max_filter_limit: builder.max_filter_limit,
+            default_filter_limit: builder.default_filter_limit,
+            auth_dm: builder.auth_dm,
             min_pow: builder.min_pow,
             #[cfg(feature = "tor")]
-            hidden_service,
+            tor: builder.tor,
+            #[cfg(feature = "tor")]
+            hidden_service: OnceCell::new(),
             write_policy: builder.write_plugins,
             query_policy: builder.query_plugins,
             nip42: builder.nip42,
             test: builder.test,
-        })
+            running: Arc::new(AtomicBool::new(false)),
+        }
     }
 
-    pub async fn run(builder: RelayBuilder) -> Result<Self, Error> {
-        let relay: Self = Self::new(builder).await?;
-        relay.listen().await?;
-        Ok(relay)
+    async fn addr(&self) -> &SocketAddr {
+        self.addr
+            .get_or_init(|| async {
+                let port: u16 = util::find_available_port().await;
+                SocketAddr::new(self.ip, port)
+            })
+            .await
     }
 
     /// Start socket to listen for new websocket connections
-    async fn listen(&self) -> Result<(), Error> {
-        let listener: TcpListener = TcpListener::bind(&self.addr).await?;
+    pub async fn run(&self) -> Result<(), Error> {
+        if self.running.load(Ordering::SeqCst) {
+            return Err(Error::AlreadyRunning);
+        }
+
+        // Get the address
+        let addr: &SocketAddr = self.addr().await;
+
+        // Start listener
+        let listener: TcpListener = TcpListener::bind(&addr).await?;
 
         let r: Self = self.clone();
         tokio::spawn(async move {
+            r.running.store(true, Ordering::SeqCst);
+
             loop {
                 tokio::select! {
                     output = listener.accept() => {
@@ -143,6 +157,8 @@ impl InnerLocalRelay {
                 }
             }
 
+            r.running.store(false, Ordering::SeqCst);
+
             tracing::info!("Local relay listener loop terminated.");
         });
 
@@ -150,14 +166,34 @@ impl InnerLocalRelay {
     }
 
     #[inline]
-    pub fn url(&self) -> String {
-        format!("ws://{}", self.addr)
+    pub async fn url(&self) -> RelayUrl {
+        let addr: &SocketAddr = self.addr().await;
+        let addr: String = format!("ws://{addr}");
+        // SAFETY: must be a valid address
+        RelayUrl::parse(&addr).unwrap()
     }
 
     #[inline]
     #[cfg(feature = "tor")]
-    pub fn hidden_service(&self) -> Option<&str> {
-        self.hidden_service.as_deref()
+    pub async fn hidden_service(&self) -> Result<&Option<String>, Error> {
+        self.hidden_service
+            .get_or_try_init(|| async {
+                match &self.tor {
+                    Some(opts) => {
+                        let addr = self.addr().await;
+                        let service = native::tor::launch_onion_service(
+                            opts.nickname.clone(),
+                            *addr,
+                            80,
+                            opts.custom_path.as_ref(),
+                        )
+                        .await?;
+                        Ok(service.onion_name().map(|n| format!("ws://{n}")))
+                    }
+                    None => Ok(None),
+                }
+            })
+            .await
     }
 
     pub fn notify_event(&self, event: Event) -> bool {
@@ -264,13 +300,20 @@ impl InnerLocalRelay {
                 event = new_event.recv() => {
                     if let Ok(event) = event {
                          // Iter subscriptions
-                        for (subscription_id, filter) in session.subscriptions.iter() {
-                            if filter.match_event(&event) {
-                                send_msg(&mut tx, RelayMessage::Event{
-                                    subscription_id: Cow::Borrowed(subscription_id),
-                                    event: Cow::Borrowed(&event)
-                                }).await?;
+                        'sub_iter: for (subscription_id, filter) in session.subscriptions.iter() {
+                            for filter in filter.iter() {
+                                // Check if event matches filter
+                                if filter.match_event(&event, MatchEventOptions::new()) {
+                                    send_msg(&mut tx, RelayMessage::Event{
+                                        subscription_id: Cow::Borrowed(subscription_id),
+                                        event: Cow::Borrowed(&event)
+                                    }).await?;
+
+                                    // Found a match, stop iterating the filters and continue with the next subscription
+                                    continue 'sub_iter;
+                                }
                             }
+
                         }
                     }
                 }
@@ -303,35 +346,65 @@ impl InnerLocalRelay {
                     session.check_rate_limit(self.rate_limit.notes_per_minute)
                 {
                     return send_msg(
-                            ws_tx,
-                            RelayMessage::Ok {
-                                event_id: event.id,
-                                status: false,
-                                message: Cow::Owned(format!(
-                                    "{}: slow down",
-                                    MachineReadablePrefix::RateLimited
-                                )),
-                            },
-                        )
-                        .await;
+                        ws_tx,
+                        RelayMessage::Ok {
+                            event_id: event.id,
+                            status: false,
+                            message: Cow::Owned(format!(
+                                "{}: slow down",
+                                MachineReadablePrefix::RateLimited
+                            )),
+                        },
+                    )
+                    .await;
+                }
+
+                if !event.verify_id() {
+                    return send_msg(
+                        ws_tx,
+                        RelayMessage::Ok {
+                            event_id: event.id,
+                            status: false,
+                            message: Cow::Owned(format!(
+                                "{}: invalid event ID",
+                                MachineReadablePrefix::Invalid
+                            )),
+                        },
+                    )
+                    .await;
                 }
 
                 // Check POW
                 if let Some(difficulty) = self.min_pow {
                     if !event.id.check_pow(difficulty) {
                         return send_msg(
-                                ws_tx,
-                                RelayMessage::Ok {
-                                    event_id: event.id,
-                                    status: false,
-                                    message: Cow::Owned(format!(
-                                        "{}: required a difficulty >= {difficulty}",
-                                        MachineReadablePrefix::Pow
-                                    )),
-                                },
-                            )
-                            .await;
+                            ws_tx,
+                            RelayMessage::Ok {
+                                event_id: event.id,
+                                status: false,
+                                message: Cow::Owned(format!(
+                                    "{}: required a difficulty >= {difficulty}",
+                                    MachineReadablePrefix::Pow
+                                )),
+                            },
+                        )
+                        .await;
                     }
+                }
+
+                if !event.verify_signature() {
+                    return send_msg(
+                        ws_tx,
+                        RelayMessage::Ok {
+                            event_id: event.id,
+                            status: false,
+                            message: Cow::Owned(format!(
+                                "{}: invalid event signature",
+                                MachineReadablePrefix::Invalid
+                            )),
+                        },
+                    )
+                    .await;
                 }
 
                 // Check if it's configured to require NIP42 authentication for writing
@@ -351,7 +424,8 @@ impl InnerLocalRelay {
                         RelayMessage::Auth {
                             challenge: Cow::Owned(session.nip42.generate_challenge()),
                         },
-                    ).await?;
+                    )
+                    .await?;
 
                     // Return error
                     return send_msg(
@@ -364,7 +438,8 @@ impl InnerLocalRelay {
                                 MachineReadablePrefix::AuthRequired
                             )),
                         },
-                    ).await;
+                    )
+                    .await;
                 }
 
                 if is_protected {
@@ -382,7 +457,7 @@ impl InnerLocalRelay {
                                     )),
                                 },
                             )
-                                .await;
+                            .await;
                         }
                     }
                 }
@@ -392,14 +467,18 @@ impl InnerLocalRelay {
                     let event_id = event.id;
                     if let PolicyResult::Reject(m) = policy.admit_event(&event, addr).await {
                         return send_msg(
-                                ws_tx,
-                                RelayMessage::Ok {
-                                    event_id,
-                                    status: false,
-                                    message: Cow::Owned(format!("{}: {}", MachineReadablePrefix::Blocked, m)),
-                                },
-                            )
-                            .await;
+                            ws_tx,
+                            RelayMessage::Ok {
+                                event_id,
+                                status: false,
+                                message: Cow::Owned(format!(
+                                    "{}: {}",
+                                    MachineReadablePrefix::Blocked,
+                                    m
+                                )),
+                            },
+                        )
+                        .await;
                     }
                 }
 
@@ -408,31 +487,31 @@ impl InnerLocalRelay {
                 match event_status {
                     DatabaseEventStatus::Saved => {
                         return send_msg(
-                                ws_tx,
-                                RelayMessage::Ok {
-                                    event_id: event.id,
-                                    status: true,
-                                    message: Cow::Owned(format!(
-                                        "{}: already have this event",
-                                        MachineReadablePrefix::Duplicate
-                                    )),
-                                },
-                            )
-                            .await;
+                            ws_tx,
+                            RelayMessage::Ok {
+                                event_id: event.id,
+                                status: true,
+                                message: Cow::Owned(format!(
+                                    "{}: already have this event",
+                                    MachineReadablePrefix::Duplicate
+                                )),
+                            },
+                        )
+                        .await;
                     }
                     DatabaseEventStatus::Deleted => {
                         return send_msg(
-                                ws_tx,
-                                RelayMessage::Ok {
-                                    event_id: event.id,
-                                    status: false,
-                                    message: Cow::Owned(format!(
-                                        "{}: this event is deleted",
-                                        MachineReadablePrefix::Blocked
-                                    )),
-                                },
-                            )
-                            .await;
+                            ws_tx,
+                            RelayMessage::Ok {
+                                event_id: event.id,
+                                status: false,
+                                message: Cow::Owned(format!(
+                                    "{}: this event is deleted",
+                                    MachineReadablePrefix::Blocked
+                                )),
+                            },
+                        )
+                        .await;
                     }
                     DatabaseEventStatus::NotExistent => {}
                 }
@@ -444,48 +523,18 @@ impl InnerLocalRelay {
 
                     if !authored && !tagged {
                         return send_msg(
-                                ws_tx,
-                                RelayMessage::Ok {
-                                    event_id: event.id,
-                                    status: false,
-                                    message: Cow::Owned(format!(
-                                        "{}: event not related to owner of this relay",
-                                        MachineReadablePrefix::Blocked
-                                    )),
-                                },
-                            )
-                            .await;
+                            ws_tx,
+                            RelayMessage::Ok {
+                                event_id: event.id,
+                                status: false,
+                                message: Cow::Owned(format!(
+                                    "{}: event not related to owner of this relay",
+                                    MachineReadablePrefix::Blocked
+                                )),
+                            },
+                        )
+                        .await;
                     }
-                }
-
-                if !event.verify_id() {
-                    return send_msg(
-                            ws_tx,
-                            RelayMessage::Ok {
-                                event_id: event.id,
-                                status: false,
-                                message: Cow::Owned(format!(
-                                    "{}: invalid event ID",
-                                    MachineReadablePrefix::Invalid
-                                )),
-                            },
-                        )
-                        .await;
-                }
-
-                if !event.verify_signature() {
-                    return send_msg(
-                            ws_tx,
-                            RelayMessage::Ok {
-                                event_id: event.id,
-                                status: false,
-                                message: Cow::Owned(format!(
-                                    "{}: invalid event signature",
-                                    MachineReadablePrefix::Invalid
-                                )),
-                            },
-                        )
-                        .await;
                 }
 
                 if event.kind.is_ephemeral() {
@@ -496,14 +545,14 @@ impl InnerLocalRelay {
 
                     // Send OK message
                     return send_msg(
-                            ws_tx,
-                            RelayMessage::Ok {
-                                event_id,
-                                status: true,
-                                message: Cow::Owned(String::new()),
-                            },
-                        )
-                        .await;
+                        ws_tx,
+                        RelayMessage::Ok {
+                            event_id,
+                            status: true,
+                            message: Cow::Owned(String::new()),
+                        },
+                    )
+                    .await;
                 }
 
                 let msg: RelayMessage = match self.database.save_event(&event).await {
@@ -525,7 +574,10 @@ impl InnerLocalRelay {
                             RelayMessage::Ok {
                                 event_id: event.id,
                                 status: false,
-                                message: Cow::Owned(format!("{}: unknown", MachineReadablePrefix::Error)),
+                                message: Cow::Owned(format!(
+                                    "{}: unknown",
+                                    MachineReadablePrefix::Error
+                                )),
                             }
                         }
                     }
@@ -534,7 +586,10 @@ impl InnerLocalRelay {
                         RelayMessage::Ok {
                             event_id: event.id,
                             status: false,
-                            message: Cow::Owned(format!("{}: database error", MachineReadablePrefix::Error)),
+                            message: Cow::Owned(format!(
+                                "{}: database error",
+                                MachineReadablePrefix::Error
+                            )),
                         }
                     }
                 };
@@ -543,129 +598,30 @@ impl InnerLocalRelay {
             }
             ClientMessage::Req {
                 subscription_id,
-                filter,
+                filters,
             } => {
-                // Check number of subscriptions
-                if session.subscriptions.len() >= self.rate_limit.max_reqs
-                    && !session.subscriptions.contains_key(&subscription_id)
-                {
-                    return send_msg(
-                            ws_tx,
-                            RelayMessage::Closed {
-                                subscription_id,
-                                message: Cow::Owned(format!(
-                                    "{}: too many REQs",
-                                    MachineReadablePrefix::RateLimited
-                                )),
-                            },
-                        )
-                        .await;
-                }
-
-                // Check NIP42
-                if let Some(nip42) = &self.nip42 {
-                    // TODO: check if public key allowed
-
-                    // Check mode and if it's authenticated
-                    if nip42.mode.is_read() && !session.nip42.is_authenticated() {
-                        // Generate and send AUTH challenge
-                        send_msg(
-                            ws_tx,
-                            RelayMessage::Auth {
-                                challenge: Cow::Owned(session.nip42.generate_challenge()),
-                            },
-                        )
-                        .await?;
-
-                        // Return error
-                        return send_msg(
-                                ws_tx,
-                                RelayMessage::Closed {
-                                    subscription_id,
-                                    message: Cow::Owned(format!(
-                                        "{}: you must auth",
-                                        MachineReadablePrefix::AuthRequired
-                                    )),
-                                },
-                            )
-                            .await;
-                    }
-                }
-
-                // check query policy plugins
-                for plugin in self.query_policy.iter() {
-                    if let PolicyResult::Reject(msg) = plugin.admit_query(&filter, addr).await {
-                        return send_msg(
-                                ws_tx,
-                                RelayMessage::Closed {
-                                    subscription_id,
-                                    message: Cow::Owned(format!("{}: {}", MachineReadablePrefix::Error, msg)),
-                                },
-                            )
-                            .await;
-                    }
-                }
-
-                let filter: Filter = filter.into_owned();
-
-                // Check if subscription has IDs
-                let ids_len: Option<usize> = filter.ids.as_ref().map(|ids| ids.len());
-
-                // Query database
-                let events: Events = self.database.query(filter.clone()).await?;
-                let events_len: usize = events.len();
-
-                tracing::debug!(
-                    "Found {events_len} events for subscription '{subscription_id}'",
-                );
-
-                let mut json_msgs: Vec<String> = Vec::with_capacity(events_len + 1);
-
-                // Add events
-                json_msgs.extend(
-                    events
-                        .into_iter()
-                        .map(|event| RelayMessage::Event {subscription_id: Cow::Borrowed(subscription_id.as_ref()), event: Cow::Owned(event)}.as_json()),
-                );
-
-                // Add EOSE message
-                json_msgs.push(RelayMessage::EndOfStoredEvents(Cow::Borrowed(subscription_id.as_ref())).as_json());
-
-                match ids_len {
-                    // Requested IDs len is the same as the query output, close the subscription.
-                    Some(ids_len) if ids_len == events_len => {
-                        json_msgs.push(RelayMessage::Closed {
-                            subscription_id,
-                            message: Cow::Borrowed(""),
-                        }.as_json());
-                    },
-                    // The stored events are all served, but miss some: save the subscription.
-                    _ => {
-                        // Save the subscription
-                        session
-                            .subscriptions
-                            .insert(subscription_id.clone().into_owned(), filter);
-                    }
-                }
-
-                // Send JSON messages
-                send_json_msgs(ws_tx, json_msgs).await
-            }
-            ClientMessage::ReqMultiFilter { subscription_id, .. } => {
-                send_msg(
+                self.handle_req(
+                    session,
                     ws_tx,
-                    RelayMessage::Closed {
-                        subscription_id,
-                        message: Cow::Owned(format!("{}: multi-filter REQs aren't supported (https://github.com/nostr-protocol/nips/pull/1645)", MachineReadablePrefix::Unsupported)),
-                    },
-                ).await
+                    addr,
+                    subscription_id,
+                    filters.into_iter().map(|f| f.into_owned()).collect(),
+                )
+                .await
             }
             ClientMessage::Count {
                 subscription_id,
                 filter,
             } => {
                 let count: usize = self.database.count(filter.into_owned()).await?;
-                send_msg(ws_tx, RelayMessage::Count { subscription_id, count }).await
+                send_msg(
+                    ws_tx,
+                    RelayMessage::Count {
+                        subscription_id,
+                        count,
+                    },
+                )
+                .await
             }
             ClientMessage::Close(subscription_id) => {
                 session.subscriptions.remove(&subscription_id);
@@ -689,7 +645,10 @@ impl InnerLocalRelay {
                         RelayMessage::Ok {
                             event_id: event.id,
                             status: false,
-                            message: Cow::Owned(format!("{}: {e}", MachineReadablePrefix::AuthRequired)),
+                            message: Cow::Owned(format!(
+                                "{}: {e}",
+                                MachineReadablePrefix::AuthRequired
+                            )),
                         },
                     )
                     .await
@@ -718,7 +677,7 @@ impl InnerLocalRelay {
                 let mut storage = NegentropyStorageVector::with_capacity(items.len());
                 for (id, timestamp) in items.into_iter() {
                     let id: Id = Id::from_byte_array(id.to_bytes());
-                    storage.insert(timestamp.as_u64(), id)?;
+                    storage.insert(timestamp.as_secs(), id)?;
                 }
                 storage.seal()?;
 
@@ -786,6 +745,208 @@ impl InnerLocalRelay {
             }
         }
     }
+
+    async fn handle_req<S>(
+        &self,
+        session: &mut Session<'_>,
+        ws_tx: &mut WsTx<S>,
+        addr: &SocketAddr,
+        subscription_id: Cow<'_, SubscriptionId>,
+        mut filters: Vec<Filter>,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        // Check the subscription ID length
+        if subscription_id.as_str().chars().count() > self.max_subid_length {
+            return send_msg(
+                ws_tx,
+                RelayMessage::Closed {
+                    subscription_id,
+                    message: Cow::Owned(format!(
+                        "{}: subscription ID exceeds max length {}",
+                        MachineReadablePrefix::Blocked,
+                        self.max_subid_length
+                    )),
+                },
+            )
+            .await;
+        }
+
+        // Check number of subscriptions
+        if session.subscriptions.len() >= self.rate_limit.max_reqs
+            && !session.subscriptions.contains_key(&subscription_id)
+        {
+            return send_msg(
+                ws_tx,
+                RelayMessage::Closed {
+                    subscription_id,
+                    message: Cow::Owned(format!(
+                        "{}: too many REQs",
+                        MachineReadablePrefix::RateLimited
+                    )),
+                },
+            )
+            .await;
+        }
+
+        // Check NIP42
+        if let Some(nip42) = &self.nip42 {
+            // TODO: check if public key allowed
+
+            // Check mode and if it's authenticated
+            if nip42.mode.is_read() && !session.nip42.is_authenticated() {
+                return send_auth_and_close(
+                    ws_tx,
+                    subscription_id,
+                    session.nip42.generate_challenge(),
+                )
+                .await;
+            }
+        }
+
+        // Check if NIP-42 DMs are enabled and any filter includes the GiftWrap kind
+        if let Some(giftwraps_filters) = self
+            .auth_dm
+            .then(|| find_filters_with_kind(&filters, &Kind::GiftWrap))
+            .flatten()
+        {
+            let Some(ref pkey) = session.nip42.public_key else {
+                // The user must be authenticated to access DMs
+                return send_auth_and_close(
+                    ws_tx,
+                    subscription_id,
+                    session.nip42.generate_challenge(),
+                )
+                .await;
+            };
+
+            let hex_pkey = pkey.to_hex();
+            for filter in giftwraps_filters {
+                let Some(p_tag) = filter.generic_tags.get(&P_TAG) else {
+                    // Reject if no "p" tag is present (requesting all relay DMs)
+                    return send_gift_wrap_error(ws_tx, subscription_id).await;
+                };
+
+                if p_tag.len() != 1 || p_tag.iter().next().expect("length is 1") != &hex_pkey {
+                    // Reject if multiple public keys or wrong public key
+                    return send_gift_wrap_error(ws_tx, subscription_id).await;
+                }
+            }
+        }
+
+        for filter in filters.iter_mut() {
+            match filter.limit {
+                Some(filter_limit) => {
+                    // Filter limit set, check if it's within the limit
+                    if let Some(max_limit) = self.max_filter_limit {
+                        // If the limit is greater than the max limit, use the max limit
+                        if filter_limit > max_limit {
+                            filter.limit = Some(max_limit)
+                        }
+                    }
+                }
+                // No limit set, if the filter has IDs, set the limit to the number of IDs, otherwise to the default limit.
+                None => match filter.ids.as_ref() {
+                    Some(ids) => {
+                        filter.limit = Some(ids.len());
+                    }
+                    None => filter.limit = Some(self.default_filter_limit),
+                },
+            }
+        }
+
+        // check query policy plugins
+        for plugin in self.query_policy.iter() {
+            for filter in filters.iter() {
+                if let PolicyResult::Reject(msg) = plugin.admit_query(filter, addr).await {
+                    return send_msg(
+                        ws_tx,
+                        RelayMessage::Closed {
+                            subscription_id,
+                            message: Cow::Owned(format!(
+                                "{}: {}",
+                                MachineReadablePrefix::Error,
+                                msg
+                            )),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // Check if subscription has IDs
+        let ids_len: Option<usize> = filters
+            .iter()
+            .map(|f| f.ids.as_ref().map(|ids| ids.len()))
+            .sum();
+
+        // Query database
+        let events: Events = if self.test.send_random_events {
+            let mut events: Events = Events::default();
+
+            let keys = Keys::generate();
+
+            for _ in 0..500 {
+                events.insert(EventBuilder::text_note("Test").sign_with_keys(&keys)?);
+            }
+
+            events
+        } else {
+            let mut events: Events = Events::default();
+
+            for filter in filters.iter() {
+                let res = self.database.query(filter.clone()).await?;
+                events = events.merge(res);
+            }
+
+            events
+        };
+
+        let events_len: usize = events.len();
+
+        tracing::debug!("Found {events_len} events for subscription '{subscription_id}'",);
+
+        let mut json_msgs: Vec<String> = Vec::with_capacity(events_len + 1);
+
+        // Add events
+        json_msgs.extend(events.into_iter().map(|event| {
+            RelayMessage::Event {
+                subscription_id: Cow::Borrowed(subscription_id.as_ref()),
+                event: Cow::Owned(event),
+            }
+            .as_json()
+        }));
+
+        // Add EOSE message
+        json_msgs.push(
+            RelayMessage::EndOfStoredEvents(Cow::Borrowed(subscription_id.as_ref())).as_json(),
+        );
+
+        match ids_len {
+            // Requested IDs len is the same as the query output, close the subscription.
+            Some(ids_len) if ids_len == events_len => {
+                json_msgs.push(
+                    RelayMessage::Closed {
+                        subscription_id,
+                        message: Cow::Borrowed(""),
+                    }
+                    .as_json(),
+                );
+            }
+            // The stored events are all served, but miss some: save the subscription.
+            _ => {
+                // Save the subscription
+                session
+                    .subscriptions
+                    .insert(subscription_id.clone().into_owned(), filters);
+            }
+        }
+
+        // Send JSON messages
+        send_json_msgs(ws_tx, json_msgs).await
+    }
 }
 
 #[inline]
@@ -795,6 +956,81 @@ where
 {
     tx.send(Message::Text(msg.as_json().into())).await?;
     Ok(())
+}
+
+async fn send_auth_and_close<S>(
+    tx: &mut WsTx<S>,
+    subscription_id: Cow<'_, SubscriptionId>,
+    challenge: String,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // Generate and send AUTH challenge
+    send_msg(
+        tx,
+        RelayMessage::Auth {
+            challenge: Cow::Owned(challenge),
+        },
+    )
+    .await?;
+
+    // Return error
+    send_msg(
+        tx,
+        RelayMessage::Closed {
+            subscription_id,
+            message: Cow::Owned(format!(
+                "{}: you must auth",
+                MachineReadablePrefix::AuthRequired
+            )),
+        },
+    )
+    .await
+}
+
+/// Finds filters containing the specified kind. Returns `None` if no such
+/// filters exist.
+fn find_filters_with_kind<'a>(filters: &'a [Filter], kind: &Kind) -> Option<Vec<&'a Filter>> {
+    let mut match_filters = Vec::new();
+
+    for filter in filters {
+        if filter
+            .kinds
+            .as_ref()
+            .is_some_and(|kinds| kinds.contains(kind))
+        {
+            match_filters.push(filter);
+        }
+    }
+
+    if match_filters.is_empty() {
+        return None;
+    }
+
+    Some(match_filters)
+}
+
+/// Send gift wrap error, when a user ask for someone else DMs
+#[inline]
+async fn send_gift_wrap_error<S>(
+    tx: &mut WsTx<S>,
+    subscription_id: Cow<'_, SubscriptionId>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    send_msg(
+        tx,
+        RelayMessage::Closed {
+            subscription_id,
+            message: Cow::Owned(format!(
+                "{}: you cannot request another user's gift wrap",
+                MachineReadablePrefix::Error
+            )),
+        },
+    )
+    .await
 }
 
 #[inline]

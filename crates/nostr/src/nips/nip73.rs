@@ -28,6 +28,8 @@ const BLOCKCHAIN_ADDR: &str = ":address:";
 pub enum Error {
     /// Invalid external content
     InvalidExternalContent,
+    /// Invalid NIP-73 kind
+    InvalidNip73Kind,
 }
 
 #[cfg(feature = "std")]
@@ -36,7 +38,8 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidExternalContent => write!(f, "invalid external content ID"),
+            Self::InvalidExternalContent => f.write_str("invalid external content ID"),
+            Self::InvalidNip73Kind => f.write_str("Invalid NIP-73 kind"),
         }
     }
 }
@@ -82,10 +85,55 @@ pub enum ExternalContentId {
     },
 }
 
+/// NIP-73 kinds
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Nip73Kind {
+    /// URLs kind "web"
+    Url,
+    /// Books kind "isbn"
+    Book,
+    /// Geohashes kind "geo"
+    Geohashe,
+    /// Movies kind "isan"
+    Movie,
+    /// Papers kind "doi"
+    Paper,
+    /// Hashtags kind "#"
+    Hashtag,
+    /// Podcast feeds kind "podcast:guid"
+    PodcastFeed,
+    /// Podcast episodes kind "podcast:item:guid"
+    PodcastEpisode,
+    /// Podcast publishers kind "podcast:publisher:guid"
+    PodcastPublisher,
+    /// Blockchain transaction kind "<blockchain>:tx"
+    BlockchainTransaction(String),
+    /// Blockchain address kind "<blockchain>:address"
+    BlockchainAddress(String),
+}
+
+impl fmt::Display for Nip73Kind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Url => f.write_str("web"),
+            Self::Book => f.write_str("isbn"),
+            Self::Geohashe => f.write_str("geo"),
+            Self::Movie => f.write_str("isan"),
+            Self::Paper => f.write_str("doi"),
+            Self::Hashtag => HASHTAG.fmt(f),
+            Self::PodcastFeed => f.write_str("podcast:guid"),
+            Self::PodcastEpisode => f.write_str("podcast:item:guid"),
+            Self::PodcastPublisher => f.write_str("podcast:publisher:guid"),
+            Self::BlockchainTransaction(blockchain) => write!(f, "{blockchain}:tx"),
+            Self::BlockchainAddress(blockchain) => write!(f, "{blockchain}:address"),
+        }
+    }
+}
+
 impl fmt::Display for ExternalContentId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Url(url) => write!(f, "{url}"),
+            Self::Url(url) => url.fmt(f),
             Self::Hashtag(hashtag) => write!(f, "{HASHTAG}{hashtag}"),
             Self::Geohash(hash) => write!(f, "{GEOHASH}{hash}"),
             Self::Book(id) => write!(f, "{BOOK}{id}"),
@@ -122,6 +170,41 @@ impl fmt::Display for ExternalContentId {
                         .unwrap_or_default()
                 )
             }
+        }
+    }
+}
+
+impl FromStr for Nip73Kind {
+    type Err = Error;
+
+    fn from_str(nip73_kind: &str) -> Result<Self, Self::Err> {
+        match nip73_kind {
+            "web" => Ok(Self::Url),
+            "isbn" => Ok(Self::Book),
+            "geo" => Ok(Self::Geohashe),
+            "isan" => Ok(Self::Movie),
+            "doi" => Ok(Self::Paper),
+            HASHTAG => Ok(Self::Hashtag),
+            "podcast:guid" => Ok(Self::PodcastFeed),
+            "podcast:item:guid" => Ok(Self::PodcastEpisode),
+            "podcast:publisher:guid" => Ok(Self::PodcastPublisher),
+            blockchain_tx
+                if blockchain_tx.ends_with(":tx")
+                    && blockchain_tx.chars().filter(|c| *c == ':').count() == 1 =>
+            {
+                Ok(Self::BlockchainTransaction(
+                    blockchain_tx.trim().replace(":tx", ""),
+                ))
+            }
+            blockchain_addr
+                if blockchain_addr.ends_with(":address")
+                    && blockchain_addr.chars().filter(|c| *c == ':').count() == 1 =>
+            {
+                Ok(Self::BlockchainAddress(
+                    blockchain_addr.trim().replace(":address", ""),
+                ))
+            }
+            _ => Err(Error::InvalidNip73Kind),
         }
     }
 }
@@ -185,6 +268,27 @@ impl FromStr for ExternalContentId {
         }
 
         Err(Error::InvalidExternalContent)
+    }
+}
+
+impl ExternalContentId {
+    /// Returns the kind of the content
+    pub fn kind(&self) -> Nip73Kind {
+        match self {
+            Self::Url(_) => Nip73Kind::Url,
+            Self::Hashtag(_) => Nip73Kind::Hashtag,
+            Self::Geohash(_) => Nip73Kind::Geohashe,
+            Self::Book(_) => Nip73Kind::Book,
+            Self::PodcastFeed(_) => Nip73Kind::PodcastFeed,
+            Self::PodcastEpisode(_) => Nip73Kind::PodcastEpisode,
+            Self::PodcastPublisher(_) => Nip73Kind::PodcastPublisher,
+            Self::Movie(_) => Nip73Kind::Movie,
+            Self::Paper(_) => Nip73Kind::Paper,
+            Self::BlockchainTransaction { chain, .. } => {
+                Nip73Kind::BlockchainTransaction(chain.clone())
+            }
+            Self::BlockchainAddress { chain, .. } => Nip73Kind::BlockchainAddress(chain.clone()),
+        }
     }
 }
 

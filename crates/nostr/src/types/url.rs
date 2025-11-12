@@ -36,9 +36,9 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Url(e) => write!(f, "{e}"),
-            Self::UnsupportedScheme => write!(f, "Unsupported scheme"),
-            Self::MultipleSchemeSeparators => write!(f, "Multiple scheme separators"),
+            Self::Url(e) => e.fmt(f),
+            Self::UnsupportedScheme => f.write_str("Unsupported scheme"),
+            Self::MultipleSchemeSeparators => f.write_str("Multiple scheme separators"),
         }
     }
 }
@@ -166,6 +166,14 @@ impl RelayUrl {
         self.url.domain()
     }
 
+    /// Return the parsed representation of the host for this URL.
+    /// Non-ASCII domain labels are punycode-encoded per IDNA if this is the host
+    /// of a special URL, or percent encoded for non-special URLs.
+    #[inline]
+    pub fn host(&self) -> Option<Host<&str>> {
+        self.url.host()
+    }
+
     /// Return the serialization of this relay URL without the trailing slash.
     ///
     /// This method will always remove the trailing slash.
@@ -189,7 +197,7 @@ impl RelayUrl {
 
 impl fmt::Display for RelayUrl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
+        f.write_str(self.as_str())
     }
 }
 

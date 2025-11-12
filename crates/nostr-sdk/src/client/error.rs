@@ -7,6 +7,7 @@ use std::fmt;
 use nostr::prelude::*;
 use nostr::serde_json;
 use nostr_database::prelude::*;
+use nostr_gossip::error::GossipError;
 use nostr_relay_pool::__private::SharedStateError;
 use nostr_relay_pool::prelude::*;
 
@@ -21,6 +22,8 @@ pub enum Error {
     Database(DatabaseError),
     /// Signer error
     Signer(SignerError),
+    /// Gossip error
+    Gossip(GossipError),
     /// [`EventBuilder`] error
     EventBuilder(event::builder::Error),
     /// Json error
@@ -30,10 +33,6 @@ pub enum Error {
     /// NIP59
     #[cfg(feature = "nip59")]
     NIP59(nip59::Error),
-    /// Event not found
-    EventNotFound(EventId),
-    /// Impossible to zap
-    ImpossibleToZap(String),
     /// Broken down filters for gossip are empty
     GossipFiltersEmpty,
     /// Private message (NIP17) relays not found
@@ -45,25 +44,20 @@ impl std::error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Relay(e) => write!(f, "{e}"),
-            Self::RelayPool(e) => write!(f, "{e}"),
-            Self::Database(e) => write!(f, "{e}"),
-            Self::Signer(e) => write!(f, "{e}"),
-            Self::EventBuilder(e) => write!(f, "{e}"),
-            Self::Json(e) => write!(f, "{e}"),
-            Self::SharedState(e) => write!(f, "{e}"),
+            Self::Relay(e) => e.fmt(f),
+            Self::RelayPool(e) => e.fmt(f),
+            Self::Database(e) => e.fmt(f),
+            Self::Signer(e) => e.fmt(f),
+            Self::Gossip(e) => e.fmt(f),
+            Self::EventBuilder(e) => e.fmt(f),
+            Self::Json(e) => e.fmt(f),
+            Self::SharedState(e) => e.fmt(f),
             #[cfg(feature = "nip59")]
-            Self::NIP59(e) => write!(f, "{e}"),
-            Self::EventNotFound(id) => {
-                write!(f, "event not found: {id}")
-            }
-            Self::ImpossibleToZap(id) => {
-                write!(f, "impossible to send zap: {id}")
-            }
+            Self::NIP59(e) => e.fmt(f),
             Self::GossipFiltersEmpty => {
-                write!(f, "gossip broken down filters are empty")
+                f.write_str("gossip broken down filters are empty")
             }
-            Self::PrivateMsgRelaysNotFound => write!(f, "Private message relays not found. The user is not ready to receive private messages."),
+            Self::PrivateMsgRelaysNotFound => f.write_str("Private message relays not found. The user is not ready to receive private messages."),
         }
     }
 }
@@ -89,6 +83,12 @@ impl From<DatabaseError> for Error {
 impl From<SignerError> for Error {
     fn from(e: SignerError) -> Self {
         Self::Signer(e)
+    }
+}
+
+impl From<GossipError> for Error {
+    fn from(e: GossipError) -> Self {
+        Self::Gossip(e)
     }
 }
 

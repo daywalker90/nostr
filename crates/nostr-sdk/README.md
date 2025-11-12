@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
     let connection: Connection = Connection::new()
         .proxy(addr) // Use `.embedded_tor()` instead to enable the embedded tor client (require `tor` feature)
         .target(ConnectionTarget::Onion);
-    let opts = Options::new().connection(connection);
+    let opts = ClientOptions::new().connection(connection);
 
     // Create new client with custom options
     let client = Client::builder().signer(keys.clone()).opts(opts).build();
@@ -102,28 +102,23 @@ NOTE: Currently `nip03` feature not support WASM.
 
 The following crate feature flags are available:
 
-| Feature     | Default | Description                                                                                  |
-|-------------|:-------:|----------------------------------------------------------------------------------------------|
-| `tor`       |   No    | Enable support for embedded tor client                                                       |
-| `lmdb`      |   No    | Enable LMDB storage backend                                                                  |
-| `ndb`       |   No    | Enable [nostrdb](https://github.com/damus-io/nostrdb) storage backend                        |
-| `indexeddb` |   No    | Enable Web's IndexedDb storage backend                                                       |
-| `all-nips`  |   No    | Enable all NIPs                                                                              |
-| `nip03`     |   No    | Enable NIP-03: OpenTimestamps Attestations for Events                                        |
-| `nip04`     |   No    | Enable NIP-04: Encrypted Direct Message                                                      |
-| `nip05`     |   No    | Enable NIP-05: Mapping Nostr keys to DNS-based internet identifiers                          |
-| `nip06`     |   No    | Enable NIP-06: Basic key derivation from mnemonic seed phrase                                |
-| `nip07`     |   No    | Enable NIP-07: `window.nostr` capability for web browsers (**available only for `wasm32`!**) |
-| `nip11`     |   No    | Enable NIP-11: Relay Information Document                                                    |
-| `nip44`     |   No    | Enable NIP-44: Encrypted Payloads (Versioned)                                                |
-| `nip47`     |   No    | Enable NIP-47: Nostr Wallet Connect                                                          |
-| `nip49`     |   No    | Enable NIP-49: Private Key Encryption                                                        |
-| `nip57`     |   No    | Enable NIP-57: Zaps                                                                          |
-| `nip59`     |   No    | Enable NIP-59: Gift Wrap                                                                     |
+| Feature            | Default | Description                                                           |
+|--------------------|:-------:|-----------------------------------------------------------------------|
+| `tor`              |   No    | Enable support for embedded tor client                                |
+| `pow-multi-thread` |   No    | Enable event POW mining using multi-threads                           |
+| `all-nips`         |   No    | Enable all NIPs                                                       |
+| `nip03`            |   No    | Enable NIP-03: OpenTimestamps Attestations for Events                 |
+| `nip04`            |   No    | Enable NIP-04: Encrypted Direct Message                               |
+| `nip06`            |   No    | Enable NIP-06: Basic key derivation from mnemonic seed phrase         |
+| `nip44`            |   No    | Enable NIP-44: Encrypted Payloads (Versioned)                         |
+| `nip47`            |   No    | Enable NIP-47: Nostr Wallet Connect                                   |
+| `nip49`            |   No    | Enable NIP-49: Private Key Encryption                                 |
+| `nip57`            |   No    | Enable NIP-57: Zaps                                                   |
+| `nip59`            |   No    | Enable NIP-59: Gift Wrap                                              |
 
-## Supported NIPs
+## Changelog
 
-Look at <https://github.com/rust-nostr/nostr/tree/master/crates/nostr#supported-nips>
+All notable changes to this library are documented in the [CHANGELOG.md](CHANGELOG.md).
 
 ## State
 

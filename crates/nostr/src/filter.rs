@@ -7,7 +7,10 @@
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 use core::fmt;
+use core::fmt::Write;
 use core::hash::Hash;
 use core::str::FromStr;
 
@@ -36,7 +39,7 @@ impl std::error::Error for SingleLetterTagError {}
 impl fmt::Display for SingleLetterTagError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidChar => write!(f, "invalid char"),
+            Self::InvalidChar => f.write_str("invalid char"),
         }
     }
 }
@@ -280,7 +283,7 @@ impl SingleLetterTag {
 
 impl fmt::Display for SingleLetterTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
+        f.write_char(self.as_char())
     }
 }
 
@@ -316,9 +319,118 @@ impl<'de> Deserialize<'de> for SingleLetterTag {
     }
 }
 
+/// Specifies which event fields to compare with a filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct MatchEventOptions {
+    /// Compare the event id with the filter.
+    pub id: bool,
+    /// Compare the event author with the filter.
+    pub author: bool,
+    /// Compare the event kind with the filter.
+    pub kind: bool,
+    /// Compare the event tags with the filter.
+    pub tags: bool,
+    /// Check if event timestamp is after filter's `since`.
+    pub since: bool,
+    /// Check if event timestamp is before filter's `until`.
+    pub until: bool,
+    /// Check if event content contains filter's search terms
+    /// (basic NIP-50 implementation without extensions).
+    pub nip50: bool,
+}
+
+impl Default for MatchEventOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MatchEventOptions {
+    /// Creates a new [`MatchEventOptions`] that **matches all event** fields by default.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            id: true,
+            author: true,
+            kind: true,
+            tags: true,
+            since: true,
+            until: true,
+            nip50: true,
+        }
+    }
+
+    /// Returns a new [`MatchEventOptions`] that **won't match any event**.
+    #[inline]
+    pub const fn unmatch() -> Self {
+        Self {
+            id: false,
+            author: false,
+            kind: false,
+            tags: false,
+            since: false,
+            until: false,
+            nip50: false,
+        }
+    }
+
+    /// Compare the event id with the filter.
+    #[inline]
+    pub const fn id(mut self, enable: bool) -> Self {
+        self.id = enable;
+        self
+    }
+
+    /// Compare the event author with the filter.
+    #[inline]
+    pub const fn author(mut self, enable: bool) -> Self {
+        self.author = enable;
+        self
+    }
+
+    /// Compare the event kind with the filter.
+    #[inline]
+    pub const fn kind(mut self, enable: bool) -> Self {
+        self.kind = enable;
+        self
+    }
+
+    /// Compare the event tags with the filter.
+    #[inline]
+    pub const fn tags(mut self, enable: bool) -> Self {
+        self.tags = enable;
+        self
+    }
+
+    /// Check if event timestamp is after filter's `since`.
+    #[inline]
+    pub const fn since(mut self, enable: bool) -> Self {
+        self.since = enable;
+        self
+    }
+
+    /// Check if event timestamp is before filter's `until`.
+    #[inline]
+    pub const fn until(mut self, enable: bool) -> Self {
+        self.until = enable;
+        self
+    }
+
+    /// Check if event content contains filter's search terms
+    /// (basic NIP-50 implementation without extensions).
+    #[inline]
+    pub const fn nip50(mut self, enable: bool) -> Self {
+        self.nip50 = enable;
+        self
+    }
+}
+
 /// Subscription filters
 ///
 /// <https://github.com/nostr-protocol/nips/blob/master/01.md>
+//
+// NOTE: the various fields are `Option` for the reason described at https://github.com/rust-nostr/nostr/issues/302
+//
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Filter {
     /// List of [`EventId`]
@@ -821,19 +933,25 @@ impl Filter {
 
     /// Determine if [Filter] match given [Event].
     #[inline]
-    pub fn match_event(&self, event: &Event) -> bool {
-        self.ids_match(event)
-            && self.authors_match(event)
-            && self.kind_match(event)
-            && self.since.map_or(true, |t| event.created_at >= t)
-            && self.until.map_or(true, |t| event.created_at <= t)
-            && self.tag_match(event)
-            && self.search_match(event)
+    pub fn match_event(&self, event: &Event, opts: MatchEventOptions) -> bool {
+        (!opts.id || self.ids_match(event))
+            && (!opts.author || self.authors_match(event))
+            && (!opts.kind || self.kind_match(event))
+            && (!opts.since || self.since.map_or(true, |t| event.created_at >= t))
+            && (!opts.until || self.until.map_or(true, |t| event.created_at <= t))
+            && (!opts.tags || self.tag_match(event))
+            && (!opts.nip50 || self.search_match(event))
     }
 }
 
 impl JsonUtil for Filter {
     type Err = serde_json::Error;
+}
+
+impl From<Filter> for Vec<Filter> {
+    fn from(filter: Filter) -> Self {
+        vec![filter]
+    }
 }
 
 fn serialize_generic_tags<S>(generic_tags: &GenericTags, serializer: S) -> Result<S::Ok, S::Error>
@@ -1115,25 +1233,25 @@ mod tests {
 
         // ID match
         let filter: Filter = Filter::new().id(event_id);
-        assert!(filter.match_event(&event));
+        assert!(filter.match_event(&event, MatchEventOptions::new()));
 
         // Not match (kind)
         let filter: Filter = Filter::new().id(event_id).kind(Kind::Metadata);
-        assert!(!filter.match_event(&event));
+        assert!(!filter.match_event(&event, MatchEventOptions::new()));
 
         // Match (author, kind and since)
         let filter: Filter = Filter::new()
             .author(pubkey)
             .kind(Kind::TextNote)
             .since(Timestamp::from(1612808000));
-        assert!(filter.match_event(&event));
+        assert!(filter.match_event(&event, MatchEventOptions::new()));
 
         // Not match (since)
         let filter: Filter = Filter::new()
             .author(pubkey)
             .kind(Kind::TextNote)
             .since(Timestamp::from(1700000000));
-        assert!(!filter.match_event(&event));
+        assert!(!filter.match_event(&event, MatchEventOptions::new()));
 
         // Match (#p tag and kind)
         let filter: Filter = Filter::new()
@@ -1144,7 +1262,7 @@ mod tests {
                 .unwrap(),
             )
             .kind(Kind::TextNote);
-        assert!(filter.match_event(&event));
+        assert!(filter.match_event(&event, MatchEventOptions::new()));
 
         // Match (tags)
         let filter: Filter = Filter::new()
@@ -1160,7 +1278,7 @@ mod tests {
                 )
                 .unwrap(),
             );
-        assert!(filter.match_event(&event));
+        assert!(filter.match_event(&event, MatchEventOptions::new()));
 
         // Match (tags)
         let filter: Filter = Filter::new().events(vec![
@@ -1169,23 +1287,23 @@ mod tests {
             EventId::from_hex("70b10f70c1318967eddf12527799411b1a9780ad9c43858f5e5fcd45486a13a5")
                 .unwrap(),
         ]);
-        assert!(filter.match_event(&event));
+        assert!(filter.match_event(&event, MatchEventOptions::new()));
 
         // Not match (tags)
         let filter: Filter = Filter::new().events(vec![EventId::from_hex(
             "70b10f70c1318967eddf12527799411b1a9780ad9c43858f5e5fcd45486a13a5",
         )
         .unwrap()]);
-        assert!(!filter.match_event(&event));
+        assert!(!filter.match_event(&event, MatchEventOptions::new()));
 
         // Not match (tags filter for events with empty tags)
         let filter: Filter = Filter::new().hashtag("this-should-not-match");
-        assert!(!filter.match_event(&event));
-        assert!(!filter.match_event(&event_with_empty_tags));
+        assert!(!filter.match_event(&event, MatchEventOptions::new()));
+        assert!(!filter.match_event(&event_with_empty_tags, MatchEventOptions::new()));
 
         // Test match search
         let filter: Filter = Filter::new().search("test");
-        assert!(filter.match_event(&event));
+        assert!(filter.match_event(&event, MatchEventOptions::new()));
     }
 
     #[test]
@@ -1213,10 +1331,10 @@ mod tests {
         let event = Event::from_json(json).unwrap();
 
         let filter = Filter::new().search("Yuki kishi");
-        assert!(filter.match_event(&event));
+        assert!(filter.match_event(&event, MatchEventOptions::new()));
 
         let filter = Filter::new().search("yuki kishimoto");
-        assert!(filter.match_event(&event));
+        assert!(filter.match_event(&event, MatchEventOptions::new()));
     }
 }
 
@@ -1261,7 +1379,7 @@ mod benches {
             .kind(Kind::TextNote);
 
         bh.iter(|| {
-            black_box(filter.match_event(&event));
+            black_box(filter.match_event(&event, MatchEventOptions::new()));
         });
     }
 }

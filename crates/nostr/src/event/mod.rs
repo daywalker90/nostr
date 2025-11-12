@@ -31,6 +31,8 @@ pub use self::kind::Kind;
 pub use self::tag::{Tag, TagKind, TagStandard, Tags};
 pub use self::unsigned::UnsignedEvent;
 use crate::nips::nip01::CoordinateBorrow;
+use crate::nips::nip19::{self, Nip19Event, ToBech32};
+use crate::nips::nip21::ToNostrUri;
 #[cfg(feature = "std")]
 use crate::types::time::Instant;
 use crate::types::time::TimeSupplier;
@@ -294,6 +296,19 @@ impl JsonUtil for Event {
     }
 }
 
+impl ToBech32 for Event {
+    type Err = nip19::Error;
+
+    fn to_bech32(&self) -> Result<String, Self::Err> {
+        match self.coordinate() {
+            Some(coordinate) => coordinate.to_bech32(),
+            None => Nip19Event::from(self).to_bech32(),
+        }
+    }
+}
+
+impl ToNostrUri for Event {}
+
 impl TryFrom<&Event> for Metadata {
     type Error = serde_json::Error;
 
@@ -339,7 +354,7 @@ struct EventIntermediate<'a> {
     pub created_at: Cow<'a, Timestamp>,
     pub kind: Cow<'a, Kind>,
     pub tags: Cow<'a, Tags>,
-    pub content: Cow<'a, String>,
+    pub content: Cow<'a, str>,
     pub sig: Cow<'a, Signature>,
 }
 
@@ -431,7 +446,7 @@ mod tests {
     #[cfg(feature = "std")]
     fn test_event_not_expired() {
         let now = Timestamp::now();
-        let expiry_date: u64 = now.as_u64() * 2;
+        let expiry_date: u64 = now.as_secs() * 2;
 
         let my_keys = Keys::generate();
         let event = EventBuilder::text_note("my content")
@@ -570,6 +585,15 @@ mod benches {
         let event = Event::from_json(json).unwrap();
         bh.iter(|| {
             black_box(event.as_json());
+        });
+    }
+
+    #[bench]
+    pub fn event_check_pow(bh: &mut Bencher) {
+        let json = r#"{"id":"000006d11924b38e55275637c6401965c54f9ae05ffed89bce0edc1720984656","pubkey":"385c3a6ec0b9d57a4330dbd6284989be5bd00e41c535f9ca39b6ae7c521b81cd","created_at":1759497131,"kind":1,"tags":[["nonce","1180727","20"]],"content":"This is a Nostr message with embedded proof-of-work","sig":"0b216dfa714db2f146f9fa7cf20954c3fd5a2dabf69cd30ab58cf142a7ebe0fd3f4bc8e9c261245dabc0be8f942ec15d3fe3ce4dcbe81df01ceb4ced91739f52"}"#;
+        let event = Event::from_json(json).unwrap();
+        bh.iter(|| {
+            black_box(event.check_pow(16));
         });
     }
 

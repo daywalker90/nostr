@@ -7,14 +7,14 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_utility::futures_util::{future, StreamExt};
 use async_utility::task;
 use atomic_destructor::{AtomicDestructor, StealthClone};
 use nostr_database::prelude::*;
-use tokio::sync::{broadcast, mpsc, RwLockReadGuard};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLockReadGuard};
 
 pub mod builder;
 pub mod constants;
@@ -33,7 +33,7 @@ use crate::relay::flags::FlagCheck;
 use crate::relay::options::{RelayOptions, ReqExitPolicy, SyncOptions};
 use crate::relay::Relay;
 use crate::shared::SharedState;
-use crate::stream::ReceiverStream;
+use crate::stream::{BoxedStream, ReceiverStream};
 use crate::{Reconciliation, RelayServiceFlags, SubscribeOptions};
 
 /// Relay Pool Notification
@@ -301,9 +301,12 @@ impl RelayPool {
 
         // If relay has `READ` flag, inherit pool subscriptions
         if relay.flags().has_read() {
-            let subscriptions = self.subscriptions().await;
-            for (id, filters) in subscriptions.into_iter() {
-                relay.inner.update_subscription(id, filters, false).await;
+            let subscriptions = self.inner.atomic.inherit_subscriptions.read().await;
+            for (id, filter) in subscriptions.iter() {
+                relay
+                    .inner
+                    .update_subscription(id.clone(), filter.clone(), false)
+                    .await;
             }
         }
 
@@ -459,6 +462,9 @@ impl RelayPool {
     /// regardless of whether the initial connection succeeds.
     ///
     /// For further details, see the documentation of [`Relay::try_connect`].
+    ///
+    /// [`RelayStatus::Initialized`]: crate::relay::RelayStatus::Initialized
+    /// [`RelayStatus::Terminated`]: crate::relay::RelayStatus::Terminated
     pub async fn try_connect(&self, timeout: Duration) -> Output<()> {
         // Lock with read shared access
         let relays = self.inner.atomic.relays.read().await;
@@ -575,34 +581,68 @@ impl RelayPool {
 
     /// Get subscriptions
     #[inline]
-    pub async fn subscriptions(&self) -> HashMap<SubscriptionId, Filter> {
-        self.inner.atomic.subscriptions.read().await.clone()
+    pub async fn subscriptions(&self) -> HashMap<SubscriptionId, HashMap<RelayUrl, Vec<Filter>>> {
+        // Lock with read shared access
+        let relays = self.inner.atomic.relays.read().await;
+
+        let mut subscriptions: HashMap<SubscriptionId, HashMap<RelayUrl, Vec<Filter>>> =
+            HashMap::new();
+
+        for (url, relay) in relays.iter() {
+            // Get relay subscriptions
+            let relay_subscriptions = relay.subscriptions().await;
+
+            // Iterate relay subscriptions and populate the general subscriptions map
+            for (id, list) in relay_subscriptions.into_iter() {
+                subscriptions
+                    .entry(id)
+                    .or_default()
+                    .insert(url.clone(), list);
+            }
+        }
+
+        subscriptions
     }
 
     /// Get a subscription
     #[inline]
-    pub async fn subscription(&self, id: &SubscriptionId) -> Option<Filter> {
-        let subscriptions = self.inner.atomic.subscriptions.read().await;
-        subscriptions.get(id).cloned()
+    pub async fn subscription(&self, id: &SubscriptionId) -> HashMap<RelayUrl, Vec<Filter>> {
+        // Lock with read shared access
+        let relays = self.inner.atomic.relays.read().await;
+
+        let mut filters: HashMap<RelayUrl, Vec<Filter>> = HashMap::new();
+
+        // Iterate relays and populate filters
+        for (url, relay) in relays.iter() {
+            // try to get subscription by ID from the relay
+            if let Some(list) = relay.subscription(id).await {
+                filters.insert(url.clone(), list);
+            }
+        }
+
+        filters
     }
 
-    /// Register subscription in the [RelayPool]
+    /// Register subscription in the [`RelayPool`].
     ///
-    /// When a new relay will be added, saved subscriptions will be automatically used for it.
+    /// When a new relay is added, saved subscriptions will be automatically used for it.
     #[inline]
-    pub async fn save_subscription(&self, id: SubscriptionId, filter: Filter) {
-        let mut subscriptions = self.inner.atomic.subscriptions.write().await;
-        let current: &mut Filter = subscriptions.entry(id).or_default();
-        *current = filter;
+    pub async fn save_subscription<F>(&self, id: SubscriptionId, filters: F)
+    where
+        F: Into<Vec<Filter>>,
+    {
+        let mut subscriptions = self.inner.atomic.inherit_subscriptions.write().await;
+        let current: &mut Vec<Filter> = subscriptions.entry(id).or_default();
+        *current = filters.into();
     }
 
     async fn remove_subscription(&self, id: &SubscriptionId) {
-        let mut subscriptions = self.inner.atomic.subscriptions.write().await;
+        let mut subscriptions = self.inner.atomic.inherit_subscriptions.write().await;
         subscriptions.remove(id);
     }
 
     async fn remove_all_subscriptions(&self) {
-        let mut subscriptions = self.inner.atomic.subscriptions.write().await;
+        let mut subscriptions = self.inner.atomic.inherit_subscriptions.write().await;
         subscriptions.clear();
     }
 
@@ -764,13 +804,16 @@ impl RelayPool {
     /// Subscribe to filters to all relays with `READ` flag.
     ///
     /// Check [`RelayPool::subscribe_with_id_to`] docs to learn more.
-    pub async fn subscribe(
+    pub async fn subscribe<F>(
         &self,
-        filter: Filter,
+        filters: F,
         opts: SubscribeOptions,
-    ) -> Result<Output<SubscriptionId>, Error> {
+    ) -> Result<Output<SubscriptionId>, Error>
+    where
+        F: Into<Vec<Filter>>,
+    {
         let id: SubscriptionId = SubscriptionId::generate();
-        let output: Output<()> = self.subscribe_with_id(id.clone(), filter, opts).await?;
+        let output: Output<()> = self.subscribe_with_id(id.clone(), filters, opts).await?;
         Ok(Output {
             val: id,
             success: output.success,
@@ -781,23 +824,29 @@ impl RelayPool {
     /// Subscribe to filters with custom [SubscriptionId] to all relays with `READ` flag.
     ///
     /// Check [`RelayPool::subscribe_with_id_to`] docs to learn more.
-    pub async fn subscribe_with_id(
+    pub async fn subscribe_with_id<F>(
         &self,
         id: SubscriptionId,
-        filter: Filter,
+        filters: F,
         opts: SubscribeOptions,
-    ) -> Result<Output<()>, Error> {
+    ) -> Result<Output<()>, Error>
+    where
+        F: Into<Vec<Filter>>,
+    {
+        // Convert filters
+        let filters: Vec<Filter> = filters.into();
+
         // Check if isn't auto-closing subscription
         if !opts.is_auto_closing() {
             // Save subscription
-            self.save_subscription(id.clone(), filter.clone()).await;
+            self.save_subscription(id.clone(), filters.clone()).await;
         }
 
         // Get relay urls
         let urls: Vec<RelayUrl> = self.__read_relay_urls().await;
 
         // Subscribe
-        self.subscribe_with_id_to(urls, id, filter, opts).await
+        self.subscribe_with_id_to(urls, id, filters, opts).await
     }
 
     /// Subscribe to filters to specific relays
@@ -836,40 +885,43 @@ impl RelayPool {
     /// It's possible to automatically close a subscription by configuring the [SubscribeOptions].
     ///
     /// Auto-closing subscriptions aren't saved in the subscription map!
-    pub async fn subscribe_with_id_to<I, U>(
+    pub async fn subscribe_with_id_to<I, U, F>(
         &self,
         urls: I,
         id: SubscriptionId,
-        filter: Filter,
+        filters: F,
         opts: SubscribeOptions,
     ) -> Result<Output<()>, Error>
     where
         I: IntoIterator<Item = U>,
         U: TryIntoUrl,
+        F: Into<Vec<Filter>>,
         Error: From<<U as TryIntoUrl>::Err>,
     {
-        let targets = urls.into_iter().map(|u| (u, filter.clone()));
+        let filters: Vec<Filter> = filters.into();
+        let targets = urls.into_iter().map(|u| (u, filters.clone()));
         self.subscribe_targeted(id, targets, opts).await
     }
 
     /// Targeted subscription
     ///
     /// Subscribe to specific relays with specific filters.
-    pub async fn subscribe_targeted<I, U>(
+    pub async fn subscribe_targeted<I, U, F>(
         &self,
         id: SubscriptionId,
         targets: I,
         opts: SubscribeOptions,
     ) -> Result<Output<()>, Error>
     where
-        I: IntoIterator<Item = (U, Filter)>,
+        I: IntoIterator<Item = (U, F)>,
         U: TryIntoUrl,
+        F: Into<Vec<Filter>>,
         Error: From<<U as TryIntoUrl>::Err>,
     {
         // Collect targets
-        let targets: HashMap<RelayUrl, Filter> = targets
+        let targets: HashMap<RelayUrl, Vec<Filter>> = targets
             .into_iter()
-            .map(|(u, f)| Ok((u.try_into_url()?, f)))
+            .map(|(u, f)| Ok((u.try_into_url()?, f.into())))
             .collect::<Result<_, Error>>()?;
 
         // Check if urls set is empty
@@ -1059,43 +1111,53 @@ impl RelayPool {
             }
         }
 
-        // Check if sync failed (no success)
-        if output.success.is_empty() {
-            return Err(Error::NegentropyReconciliationFailed);
-        }
-
         Ok(output)
     }
 
     /// Fetch events from relays with [`RelayServiceFlags::READ`] flag.
-    pub async fn fetch_events(
+    pub async fn fetch_events<F>(
         &self,
-        filter: Filter,
+        filters: F,
         timeout: Duration,
         policy: ReqExitPolicy,
-    ) -> Result<Events, Error> {
+    ) -> Result<Events, Error>
+    where
+        F: Into<Vec<Filter>>,
+    {
         let urls: Vec<RelayUrl> = self.__read_relay_urls().await;
-        self.fetch_events_from(urls, filter, timeout, policy).await
+        self.fetch_events_from(urls, filters, timeout, policy).await
     }
 
     /// Fetch events from specific relays
-    pub async fn fetch_events_from<I, U>(
+    pub async fn fetch_events_from<I, U, F>(
         &self,
         urls: I,
-        filter: Filter,
+        filters: F,
         timeout: Duration,
         policy: ReqExitPolicy,
     ) -> Result<Events, Error>
     where
         I: IntoIterator<Item = U>,
         U: TryIntoUrl,
+        F: Into<Vec<Filter>>,
         Error: From<<U as TryIntoUrl>::Err>,
     {
-        let mut events: Events = Events::new(&filter);
+        // Convert filters
+        let filters: Vec<Filter> = filters.into();
+
+        // Construct a new events collection
+        let mut events: Events = if filters.len() == 1 {
+            // SAFETY: this can't panic because the filters are already verified that list isn't empty.
+            let filter: &Filter = &filters[0];
+            Events::new(filter)
+        } else {
+            // More than a filter, so we can't ensure to respect the limit -> construct a default collection.
+            Events::default()
+        };
 
         // Stream events
         let mut stream = self
-            .stream_events_from(urls, filter, timeout, policy)
+            .stream_events_from(urls, filters, timeout, policy)
             .await?;
         while let Some(event) = stream.next().await {
             // To find out more about why the `force_insert` was used, search for EVENTS_FORCE_INSERT ine the code.
@@ -1111,40 +1173,51 @@ impl RelayPool {
         filter: Filter,
         timeout: Duration,
         policy: ReqExitPolicy,
-    ) -> Result<ReceiverStream<Event>, Error> {
+    ) -> Result<BoxedStream<Event>, Error> {
         let urls: Vec<RelayUrl> = self.__read_relay_urls().await;
         self.stream_events_from(urls, filter, timeout, policy).await
     }
 
     /// Stream events from specific relays
-    pub async fn stream_events_from<I, U>(
+    pub async fn stream_events_from<I, U, F>(
         &self,
         urls: I,
-        filter: Filter,
+        filters: F,
         timeout: Duration,
         policy: ReqExitPolicy,
-    ) -> Result<ReceiverStream<Event>, Error>
+    ) -> Result<BoxedStream<Event>, Error>
     where
         I: IntoIterator<Item = U>,
         U: TryIntoUrl,
+        F: Into<Vec<Filter>>,
         Error: From<<U as TryIntoUrl>::Err>,
     {
-        let targets = urls
-            .into_iter()
-            .map(|u| Ok((u.try_into_url()?, filter.clone())))
-            .collect::<Result<_, Error>>()?;
+        let filters: Vec<Filter> = filters.into();
+        let targets = urls.into_iter().map(|u| (u, filters.clone()));
         self.stream_events_targeted(targets, timeout, policy).await
     }
 
     /// Targeted streaming events
     ///
     /// Stream events from specific relays with specific filters
-    pub async fn stream_events_targeted(
+    pub async fn stream_events_targeted<I, U, F>(
         &self,
-        targets: HashMap<RelayUrl, Filter>,
+        targets: I,
         timeout: Duration,
         policy: ReqExitPolicy,
-    ) -> Result<ReceiverStream<Event>, Error> {
+    ) -> Result<BoxedStream<Event>, Error>
+    where
+        I: IntoIterator<Item = (U, F)>,
+        U: TryIntoUrl,
+        F: Into<Vec<Filter>>,
+        Error: From<<U as TryIntoUrl>::Err>,
+    {
+        // Collect targets
+        let targets: HashMap<RelayUrl, Vec<Filter>> = targets
+            .into_iter()
+            .map(|(u, v)| Ok((u.try_into_url()?, v.into())))
+            .collect::<Result<_, Error>>()?;
+
         // Check if `targets` map is empty
         if targets.is_empty() {
             return Err(Error::NoRelaysSpecified);
@@ -1158,82 +1231,86 @@ impl RelayPool {
             return Err(Error::NoRelays);
         }
 
-        // Construct new map with also `Relay` struct
-        let mut map: HashMap<RelayUrl, (Relay, Filter)> = HashMap::with_capacity(targets.len());
+        let mut urls = Vec::with_capacity(targets.len());
+        let mut futures = Vec::with_capacity(targets.len());
 
-        // Populate the new map.
-        // Return an error if the relay doesn't exists.
         for (url, filter) in targets.into_iter() {
-            // Get relay
-            let relay: Relay = self.internal_relay(&relays, &url).cloned()?;
+            // Try to get the relay
+            let relay: &Relay = self.internal_relay(&relays, &url)?;
 
-            // Insert into new map
-            map.insert(url, (relay, filter));
+            // Push url
+            urls.push(url);
+
+            // Push stream events future
+            futures.push(relay.stream_events(filter, timeout, policy));
         }
 
-        // Drop relays read guard
-        drop(relays);
+        // Wait that futures complete
+        let awaited = future::join_all(futures).await;
 
-        // Create channel
-        // TODO: use unbounded channel otherwise events can be lost since below the `try_send` is used.
-        let (tx, rx) = mpsc::channel::<Event>(map.len() * 512);
+        // The urls and futures len MUST be the same!
+        assert_eq!(urls.len(), awaited.len());
 
-        // Spawn stream task
+        // Re-construct streams
+        let mut streams: Vec<(RelayUrl, BoxedStream<_>)> = Vec::with_capacity(awaited.len());
+
+        // Zip-up urls and futures into a single iterator
+        let iter = urls.into_iter().zip(awaited.into_iter());
+
+        for (url, stream) in iter {
+            match stream {
+                Ok(stream) => streams.push((url, stream)),
+                Err(e) => tracing::error!(url = %url, error = %e, "Failed to stream events."),
+            }
+        }
+
+        // Create a new channel
+        // NOTE: the events are deduplicated, so here isn't necessary a huge capacity.
+        let (tx, rx) = mpsc::channel(512);
+
+        // Single driver task: polls all streams, de-duplicates, forwards
         task::spawn(async move {
             // IDs collection, needed to check if an event was already sent to the stream
-            let ids: Mutex<HashSet<EventId>> = Mutex::new(HashSet::new());
+            let ids: Arc<Mutex<HashSet<EventId>>> = Arc::new(Mutex::new(HashSet::new()));
 
-            let mut urls: Vec<RelayUrl> = Vec::with_capacity(map.len());
-            let mut futures = Vec::with_capacity(map.len());
+            let mut futures = Vec::with_capacity(streams.len());
 
-            // Populate `urls` and `futures` vectors
-            for (url, (relay, filter)) in map.into_iter() {
-                urls.push(url);
-                futures.push(relay.fetch_events_with_callback_owned(
-                    filter,
-                    timeout,
-                    policy,
-                    |event| {
-                        // Use a synchronous mutex here!
-                        //
-                        // From tokio docs:
-                        // ```
-                        // A synchronous mutex will block the current thread when waiting to acquire the lock.
-                        // This, in turn, will block other tasks from processing.
-                        // However, switching to tokio::sync::Mutex usually does not help as the asynchronous mutex uses a synchronous mutex internally.
-                        //
-                        // As a rule of thumb, using a synchronous mutex from within asynchronous code is fine as long
-                        // as contention remains low and the lock is not held across calls to .await.
-                        // ```
-                        //
-                        // SAFETY: panics only if another user of this mutex panicked while holding the mutex.
-                        let mut ids = ids.lock().unwrap();
+            for (url, mut stream) in streams.into_iter() {
+                let tx = tx.clone();
+                let ids = ids.clone();
 
-                        // Check if ID was already seen or insert into set.
-                        if ids.insert(event.id) {
-                            // Immediately drop the set
-                            drop(ids);
+                futures.push(async move {
+                    while let Some(res) = stream.next().await {
+                        match res {
+                            Ok(event) => {
+                                let mut ids = ids.lock().await;
 
-                            // Send event
-                            let _ = tx.try_send(event);
+                                // Check if ID was already seen or insert into set.
+                                if ids.insert(event.id) {
+                                    // Immediately drop the set
+                                    drop(ids);
+
+                                    // Send event
+                                    let _ = tx.send(event).await;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(url = %url, error = %e, "Failed to stream events.")
+                            }
                         }
-                    },
-                ));
+                    }
+                });
             }
 
-            // Join all futures
-            let list = future::join_all(futures).await;
+            // Wait that all futures complete
+            future::join_all(futures).await;
 
-            // Iter results
-            for (url, result) in urls.into_iter().zip(list.into_iter()) {
-                if let Err(e) = result {
-                    tracing::error!(url = %url, error = %e, "Failed to stream events.");
-                }
-            }
+            // Close the channel
+            drop(tx);
         });
 
         // Return stream
-        Ok(ReceiverStream::new(rx))
+        Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
     /// Handle notifications
@@ -1291,7 +1368,7 @@ mod tests {
     #[tokio::test]
     async fn test_shutdown() {
         let mock = MockRelay::run().await.unwrap();
-        let url = mock.url();
+        let url = mock.url().await;
 
         let pool = RelayPool::default();
 

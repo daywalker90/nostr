@@ -7,8 +7,11 @@
 use std::borrow::Cow;
 use std::cmp;
 use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
+use async_utility::futures_util::{Stream, StreamExt};
 use async_utility::time;
 use async_wsocket::futures_util::Future;
 use async_wsocket::ConnectionMode;
@@ -39,7 +42,8 @@ pub use self::stats::RelayConnectionStats;
 pub use self::status::RelayStatus;
 use crate::policy::AdmitStatus;
 use crate::shared::SharedState;
-use crate::transport::websocket::{BoxSink, BoxStream};
+use crate::stream::BoxedStream;
+use crate::transport::websocket::{WebSocketSink, WebSocketStream};
 
 /// Subscription auto-closed reason
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +103,7 @@ pub enum RelayNotification {
 // }
 
 /// Reconciliation output
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reconciliation {
     /// Events that were stored locally (missing on relay)
     pub local: HashSet<EventId>,
@@ -120,6 +124,49 @@ impl Reconciliation {
         self.sent.extend(other.sent);
         self.received.extend(other.received);
         self.send_failures.extend(other.send_failures);
+    }
+}
+
+struct SubscriptionActivityEventStream {
+    rx: mpsc::Receiver<SubscriptionActivity>,
+    done: bool,
+}
+
+impl SubscriptionActivityEventStream {
+    fn new(rx: mpsc::Receiver<SubscriptionActivity>) -> Self {
+        Self { rx, done: false }
+    }
+}
+
+impl Stream for SubscriptionActivityEventStream {
+    type Item = Result<Event, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.done {
+            return Poll::Ready(None);
+        }
+
+        match Pin::new(&mut self.rx).poll_recv(cx) {
+            Poll::Ready(Some(activity)) => match activity {
+                SubscriptionActivity::ReceivedEvent(event) => Poll::Ready(Some(Ok(event))),
+                SubscriptionActivity::Closed(reason) => match reason {
+                    SubscriptionAutoClosedReason::AuthenticationFailed => {
+                        self.done = true;
+                        Poll::Ready(Some(Err(Error::AuthenticationFailed)))
+                    }
+                    SubscriptionAutoClosedReason::Closed(message) => {
+                        self.done = true;
+                        Poll::Ready(Some(Err(Error::RelayMessage(message))))
+                    }
+                    SubscriptionAutoClosedReason::Completed => {
+                        self.done = true;
+                        Poll::Ready(None)
+                    }
+                },
+            },
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -186,23 +233,15 @@ impl Relay {
         &self.inner.flags
     }
 
-    /// Get [`RelayInformationDocument`]
-    #[inline]
-    #[cfg(feature = "nip11")]
-    pub async fn document(&self) -> RelayInformationDocument {
-        let document = self.inner.atomic.document.read().await;
-        document.clone()
-    }
-
     /// Get subscriptions
     #[inline]
-    pub async fn subscriptions(&self) -> HashMap<SubscriptionId, Filter> {
+    pub async fn subscriptions(&self) -> HashMap<SubscriptionId, Vec<Filter>> {
         self.inner.subscriptions().await
     }
 
     /// Get filters by [SubscriptionId]
     #[inline]
-    pub async fn subscription(&self, id: &SubscriptionId) -> Option<Filter> {
+    pub async fn subscription(&self, id: &SubscriptionId) -> Option<Vec<Filter>> {
         self.inner.subscription(id).await
     }
 
@@ -339,7 +378,7 @@ impl Relay {
 
         // Try to connect
         // This will set the status to "terminated" if the connection fails
-        let stream: (BoxSink, BoxStream) = self
+        let stream: (WebSocketSink, WebSocketStream) = self
             .inner
             ._try_connect(timeout, RelayStatus::Terminated)
             .await?;
@@ -492,58 +531,79 @@ impl Relay {
     /// It's possible to automatically close a subscription by configuring the [SubscribeOptions].
     ///
     /// Note: auto-closing subscriptions aren't saved in subscriptions map!
-    pub async fn subscribe_with_id(
+    pub async fn subscribe_with_id<F>(
         &self,
         id: SubscriptionId,
-        filter: Filter,
+        filters: F,
         opts: SubscribeOptions,
-    ) -> Result<(), Error> {
-        // Check if auto-close condition is set
+    ) -> Result<(), Error>
+    where
+        F: Into<Vec<Filter>>,
+    {
+        // Convert filters
+        let filters: Vec<Filter> = filters.into();
+
+        // Check if the auto-close condition is set
         match opts.auto_close {
-            Some(opts) => self.subscribe_auto_closing(id, filter, opts, None),
-            None => self.subscribe_long_lived(id, filter).await,
+            Some(opts) => self.subscribe_auto_closing(id, filters, opts, None).await,
+            None => self.subscribe_long_lived(id, filters).await,
         }
     }
 
-    fn subscribe_auto_closing(
+    async fn subscribe_auto_closing(
         &self,
         id: SubscriptionId,
-        filter: Filter,
+        filters: Vec<Filter>,
         opts: SubscribeAutoCloseOptions,
         activity: Option<mpsc::Sender<SubscriptionActivity>>,
     ) -> Result<(), Error> {
         // Compose REQ message
         let msg: ClientMessage = ClientMessage::Req {
             subscription_id: Cow::Borrowed(&id),
-            filter: Cow::Borrowed(&filter),
+            filters: filters.iter().map(Cow::Borrowed).collect(),
         };
 
         // Subscribe to notifications
         let notifications = self.inner.internal_notification_sender.subscribe();
 
+        // Register the auto-closing subscription
+        self.inner
+            .add_auto_closing_subscription(id.clone(), filters.clone())
+            .await;
+
         // Send REQ message
-        self.inner.send_msg(msg)?;
+        if let Err(e) = self.inner.send_msg(msg) {
+            // Remove previously added subscription
+            self.inner.remove_subscription(&id).await;
+
+            // Propagate error
+            return Err(e);
+        }
 
         // Spawn auto-closing handler
         self.inner
-            .spawn_auto_closing_handler(id, filter, opts, notifications, activity);
+            .spawn_auto_closing_handler(id, filters, opts, notifications, activity);
 
         // Return
         Ok(())
     }
 
-    async fn subscribe_long_lived(&self, id: SubscriptionId, filter: Filter) -> Result<(), Error> {
+    async fn subscribe_long_lived(
+        &self,
+        id: SubscriptionId,
+        filters: Vec<Filter>,
+    ) -> Result<(), Error> {
         // Compose REQ message
         let msg: ClientMessage = ClientMessage::Req {
             subscription_id: Cow::Borrowed(&id),
-            filter: Cow::Borrowed(&filter),
+            filters: filters.iter().map(Cow::Borrowed).collect(),
         };
 
         // Send REQ message
         self.inner.send_msg(msg)?;
 
         // No auto-close subscription: update subscription filter
-        self.inner.update_subscription(id, filter, true).await;
+        self.inner.update_subscription(id, filters, true).await;
 
         // Return
         Ok(())
@@ -561,16 +621,18 @@ impl Relay {
         self.inner.unsubscribe_all().await
     }
 
-    /// Get events of filter with custom callback
-    pub(crate) async fn fetch_events_with_callback(
+    /// Stream events from relay
+    pub async fn stream_events<F>(
         &self,
-        filter: Filter,
+        filters: F,
         timeout: Duration,
         policy: ReqExitPolicy,
-        mut callback: impl FnMut(Event),
-    ) -> Result<(), Error> {
-        // Create channel
-        let (tx, mut rx) = mpsc::channel(512);
+    ) -> Result<BoxedStream<Result<Event, Error>>, Error>
+    where
+        F: Into<Vec<Filter>>,
+    {
+        // Create channels
+        let (tx, rx) = mpsc::channel(512);
 
         // Compose auto-closing options
         let opts: SubscribeAutoCloseOptions = SubscribeAutoCloseOptions::default()
@@ -579,44 +641,10 @@ impl Relay {
 
         // Subscribe
         let id: SubscriptionId = SubscriptionId::generate();
-        self.subscribe_auto_closing(id, filter, opts, Some(tx))?;
+        self.subscribe_auto_closing(id, filters.into(), opts, Some(tx))
+            .await?;
 
-        // Handle subscription activity
-        while let Some(activity) = rx.recv().await {
-            match activity {
-                SubscriptionActivity::ReceivedEvent(event) => {
-                    callback(event);
-                }
-                SubscriptionActivity::Closed(reason) => {
-                    match reason {
-                        // NIP42 authentication failed
-                        SubscriptionAutoClosedReason::AuthenticationFailed => {
-                            return Err(Error::AuthenticationFailed);
-                        }
-                        // Closed by relay
-                        SubscriptionAutoClosedReason::Closed(message) => {
-                            return Err(Error::RelayMessage(message));
-                        }
-                        // Completed
-                        SubscriptionAutoClosedReason::Completed => break,
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    #[inline]
-    pub(crate) async fn fetch_events_with_callback_owned(
-        self,
-        filter: Filter,
-        timeout: Duration,
-        policy: ReqExitPolicy,
-        callback: impl Fn(Event),
-    ) -> Result<(), Error> {
-        self.fetch_events_with_callback(filter, timeout, policy, callback)
-            .await
+        Ok(Box::pin(SubscriptionActivityEventStream::new(rx)))
     }
 
     /// Fetch events
@@ -626,11 +654,19 @@ impl Relay {
         timeout: Duration,
         policy: ReqExitPolicy,
     ) -> Result<Events, Error> {
+        // Construct a new events collection
         let mut events: Events = Events::new(&filter);
-        self.fetch_events_with_callback(filter, timeout, policy, |event| {
+
+        // Stream events
+        let mut stream = self.stream_events(filter, timeout, policy).await?;
+
+        while let Some(res) = stream.next().await {
+            // Get event from the result
+            let event: Event = res?;
+
             // Use force insert here!
             // Due to the configurable REQ exit policy, the user may want to wait for events after EOSE.
-            // If the filter had a limit, the force insert allows adding events post-EOSE.
+            // If the filter has a limit, the force insert allows adding events post-EOSE.
             //
             // For example, if we use `Events::insert` here,
             // if the filter is '{"kinds":[1],"limit":3}' and the policy `ReqExitPolicy::WaitForEventsAfterEOSE(1)`,
@@ -640,8 +676,8 @@ impl Relay {
             //
             // LOOKUP_ID: EVENTS_FORCE_INSERT
             events.force_insert(event);
-        })
-        .await?;
+        }
+
         Ok(events)
     }
 
@@ -772,13 +808,23 @@ mod tests {
         Relay::new(url, SharedState::default(), opts)
     }
 
+    fn new_relay_with_database(
+        url: RelayUrl,
+        database: Arc<dyn NostrDatabase>,
+        opts: RelayOptions,
+    ) -> Relay {
+        let mut state = SharedState::default();
+        state.database = database;
+        Relay::new(url, state, opts)
+    }
+
     /// Setup public (without NIP42 auth) relay with N events to test event fetching
     ///
     /// **Adds ONLY text notes**
     async fn setup_event_fetching_relay(num_events: usize) -> (Relay, MockRelay) {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let relay = new_relay(url, RelayOptions::default());
         relay.connect();
@@ -800,7 +846,7 @@ mod tests {
     async fn setup_subscription_relay() -> (SubscriptionId, Relay, MockRelay) {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         // Sender
         let relay: Relay = new_relay(url.clone(), RelayOptions::default());
@@ -826,7 +872,7 @@ mod tests {
     async fn test_ok_msg() {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let relay: Relay = new_relay(url, RelayOptions::default());
 
@@ -843,7 +889,7 @@ mod tests {
     async fn test_status_with_reconnection_enabled() {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let relay: Relay = new_relay(url, RelayOptions::default());
 
@@ -866,7 +912,7 @@ mod tests {
     async fn test_status_with_reconnection_disabled() {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let relay: Relay = new_relay(url, RelayOptions::default().reconnect(false));
 
@@ -889,7 +935,7 @@ mod tests {
     async fn test_disconnect() {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let relay: Relay = new_relay(url, RelayOptions::default());
 
@@ -942,7 +988,7 @@ mod tests {
     async fn test_connect() {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let relay: Relay = new_relay(url, RelayOptions::default());
 
@@ -976,7 +1022,7 @@ mod tests {
     async fn test_try_connect() {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let relay: Relay = new_relay(url, RelayOptions::default());
 
@@ -1013,9 +1059,10 @@ mod tests {
         // Mock relay
         let opts = RelayTestOptions {
             unresponsive_connection: Some(Duration::from_secs(2)),
+            ..Default::default()
         };
         let mock = MockRelay::run_with_opts(opts).await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let relay: Relay = new_relay(url, RelayOptions::default());
 
@@ -1045,9 +1092,10 @@ mod tests {
         // Mock relay
         let opts = RelayTestOptions {
             unresponsive_connection: Some(Duration::from_secs(10)),
+            ..Default::default()
         };
         let mock = MockRelay::run_with_opts(opts).await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let relay: Relay = new_relay(url, RelayOptions::default());
 
@@ -1073,9 +1121,10 @@ mod tests {
         // Mock relay
         let opts = RelayTestOptions {
             unresponsive_connection: Some(Duration::from_secs(10)),
+            ..Default::default()
         };
         let mock = MockRelay::run_with_opts(opts).await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let relay: Relay = new_relay(url, RelayOptions::default());
 
@@ -1100,7 +1149,7 @@ mod tests {
     async fn test_ban_relay() {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let relay = new_relay(url, RelayOptions::default());
 
@@ -1136,9 +1185,10 @@ mod tests {
         // Mock relay
         let opts = RelayTestOptions {
             unresponsive_connection: Some(Duration::from_secs(2)),
+            ..Default::default()
         };
         let mock = MockRelay::run_with_opts(opts).await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let relay: Relay = new_relay(url, RelayOptions::default());
 
@@ -1156,14 +1206,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fetch_events_ban_relay() {
+        // Mock relay
+        let opts = RelayTestOptions {
+            unresponsive_connection: None,
+            send_random_events: true,
+        };
+        let mock = MockRelay::run_with_opts(opts).await.unwrap();
+        let url = mock.url().await;
+
+        let relay: Relay = new_relay(
+            url,
+            RelayOptions::default()
+                .verify_subscriptions(true)
+                .ban_relay_on_mismatch(true),
+        );
+
+        assert_eq!(relay.status(), RelayStatus::Initialized);
+
+        relay.try_connect(Duration::from_secs(3)).await.unwrap();
+
+        assert_eq!(relay.status(), RelayStatus::Connected);
+
+        let filter = Filter::new().kind(Kind::Metadata);
+        relay
+            .fetch_events(filter, Duration::from_secs(3), ReqExitPolicy::ExitOnEOSE)
+            .await
+            .unwrap();
+
+        assert_eq!(relay.status(), RelayStatus::Banned);
+
+        assert!(!relay.inner.is_running());
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_ban_relay() {
+        // Mock relay
+        let opts = RelayTestOptions {
+            unresponsive_connection: None,
+            send_random_events: true,
+        };
+        let mock = MockRelay::run_with_opts(opts).await.unwrap();
+        let url = mock.url().await;
+
+        let relay = new_relay(
+            url,
+            RelayOptions::default()
+                .verify_subscriptions(true)
+                .ban_relay_on_mismatch(true),
+        );
+
+        assert_eq!(relay.status(), RelayStatus::Initialized);
+
+        relay.try_connect(Duration::from_secs(3)).await.unwrap();
+
+        assert_eq!(relay.status(), RelayStatus::Connected);
+
+        let filter = Filter::new().kind(Kind::Metadata).limit(3);
+        relay
+            .subscribe(filter, SubscribeOptions::default())
+            .await
+            .unwrap();
+
+        // Keep up the test
+        time::timeout(
+            Some(Duration::from_secs(10)),
+            relay.handle_notifications(|_| async { Ok(false) }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(relay.status(), RelayStatus::Banned);
+
+        assert!(!relay.inner.is_running());
+    }
+
+    #[tokio::test]
     async fn test_nip42_send_event() {
         // Mock relay
         let opts = RelayBuilderNip42 {
             mode: RelayBuilderNip42Mode::Write,
         };
         let builder = RelayBuilder::default().nip42(opts);
-        let mock = LocalRelay::run(builder).await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let mock = LocalRelay::new(builder);
+        mock.run().await.unwrap();
+        let url = mock.url().await;
 
         let relay: Relay = new_relay(url, RelayOptions::default());
 
@@ -1205,8 +1333,9 @@ mod tests {
             mode: RelayBuilderNip42Mode::Read,
         };
         let builder = RelayBuilder::default().nip42(opts);
-        let mock = LocalRelay::run(builder).await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let mock = LocalRelay::new(builder);
+        mock.run().await.unwrap();
+        let url = mock.url().await;
 
         let relay: Relay = new_relay(url, RelayOptions::default());
 
@@ -1409,7 +1538,7 @@ mod tests {
     async fn test_subscribe_ephemeral_event() {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         // Sender
         let relay1: Relay = new_relay(url.clone(), RelayOptions::default());
@@ -1501,7 +1630,7 @@ mod tests {
     async fn test_admit_connection() {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         let mut relay = new_relay(url.clone(), RelayOptions::default());
 
@@ -1526,13 +1655,86 @@ mod tests {
         assert!(!relay.inner.is_running());
     }
 
-    // TODO: add negentropy reconciliation test
+    #[tokio::test]
+    async fn test_negentropy_sync() {
+        // Mock relay
+        let mock = MockRelay::run().await.unwrap();
+        let url = mock.url().await;
+
+        // Database
+        let database = MemoryDatabase::with_opts(MemoryDatabaseOptions {
+            events: true,
+            max_events: None,
+        });
+
+        // Build events to store in the local database
+        let local_events = vec![
+            EventBuilder::text_note("Local 1")
+                .sign_with_keys(&Keys::generate())
+                .unwrap(),
+            EventBuilder::text_note("Local 2")
+                .sign_with_keys(&Keys::generate())
+                .unwrap(),
+            EventBuilder::new(Kind::Custom(123), "Local 123")
+                .sign_with_keys(&Keys::generate())
+                .unwrap(),
+        ];
+
+        // Save an event to the local database
+        for event in local_events.iter() {
+            database.save_event(event).await.unwrap();
+        }
+        assert_eq!(database.count(Filter::new()).await.unwrap(), 3);
+
+        // Relay
+        let relay =
+            new_relay_with_database(url, Arc::new(database.clone()), RelayOptions::default());
+
+        // Connect
+        relay.try_connect(Duration::from_secs(2)).await.unwrap();
+
+        // Build events to send to the relay
+        let relays_events = vec![
+            // Event in common with the local database
+            local_events[0].clone(),
+            EventBuilder::text_note("Test 2")
+                .sign_with_keys(&Keys::generate())
+                .unwrap(),
+            EventBuilder::text_note("Test 3")
+                .sign_with_keys(&Keys::generate())
+                .unwrap(),
+            EventBuilder::new(Kind::Custom(123), "Test 4")
+                .sign_with_keys(&Keys::generate())
+                .unwrap(),
+        ];
+
+        // Send events to the relays
+        for event in relays_events.iter() {
+            relay.send_event(event).await.unwrap();
+        }
+
+        // Sync
+        let filter = Filter::new().kind(Kind::TextNote);
+        let opts = SyncOptions::default().direction(SyncDirection::Both);
+        let output = relay.sync(filter, &opts).await.unwrap();
+
+        assert_eq!(
+            output,
+            Reconciliation {
+                local: HashSet::from([local_events[1].id]),
+                remote: HashSet::from([relays_events[1].id, relays_events[2].id]),
+                sent: HashSet::from([local_events[1].id]),
+                received: HashSet::from([relays_events[1].id, relays_events[2].id]),
+                send_failures: HashMap::new(),
+            }
+        );
+    }
 
     #[tokio::test]
     async fn test_sleep_when_idle() {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         // Relay
         let opts = RelayOptions::default()
@@ -1587,7 +1789,7 @@ mod tests {
     async fn test_sleep_when_idle_with_long_lived_subscription() {
         // Mock relay
         let mock = MockRelay::run().await.unwrap();
-        let url = RelayUrl::parse(&mock.url()).unwrap();
+        let url = mock.url().await;
 
         // Relay
         let opts = RelayOptions::default()
