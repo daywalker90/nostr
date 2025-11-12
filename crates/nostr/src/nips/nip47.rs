@@ -1631,10 +1631,22 @@ pub struct PaymentNotification {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "deserialize_empty_string_as_none")]
     pub description_hash: Option<String>,
+    /// offer's issuer for a bolt12 transaction
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub offer_issuer: Option<String>,
+    /// note from payer for a bolt12 transaction
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub payer_note: Option<String>,
     /// Payment preimage
     pub preimage: String,
     /// Payment hash
     pub payment_hash: String,
+    /// the id of the offer, for a bolt12 invoice
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_empty_string_as_none")]
+    pub offer_id: Option<String>,
     /// Amount in millisatoshis
     pub amount: u64,
     /// Fees paid in millisatoshis
@@ -1922,6 +1934,9 @@ mod tests {
             expires_at: Some(Timestamp::from_secs(546132287)),
             settled_at: Timestamp::from_secs(843548111),
             metadata: Some(Value::Object(serde_json::Map::new())),
+            offer_issuer: None,
+            payer_note: None,
+            offer_id: None,
         });
         assert_eq!(notification_parsed.notification, notification_result);
 
