@@ -170,8 +170,6 @@ pub enum Method {
     SettleHoldInvoice,
     /// Make a bolt12 offer
     MakeOffer,
-    /// Lookup a bolt12 offer
-    LookupOffer,
     /// Pay a bolt12 offer
     PayOffer,
     /// Multo pay bolt12 offers
@@ -203,7 +201,6 @@ impl Method {
             Self::CancelHoldInvoice => "cancel_hold_invoice",
             Self::SettleHoldInvoice => "settle_hold_invoice",
             Self::MakeOffer => "make_offer",
-            Self::LookupOffer => "lookup_offer",
             Self::PayOffer => "pay_offer",
             Self::MultiPayOffer => "multi_pay_offer",
             Self::GetOfferInfo => "get_offer_info",
@@ -229,7 +226,6 @@ impl FromStr for Method {
             "cancel_hold_invoice" => Ok(Self::CancelHoldInvoice),
             "settle_hold_invoice" => Ok(Self::SettleHoldInvoice),
             "make_offer" => Ok(Self::MakeOffer),
-            "lookup_offer" => Ok(Self::LookupOffer),
             "pay_offer" => Ok(Self::PayOffer),
             "multi_pay_offer" => Ok(Self::MultiPayOffer),
             "get_offer_info" => Ok(Self::GetOfferInfo),
@@ -286,8 +282,6 @@ pub enum RequestParams {
     SettleHoldInvoice(SettleHoldInvoiceRequest),
     /// Make Offer
     MakeOffer(MakeOfferRequest),
-    /// Lookup Offer
-    LookupOffer(LookupOfferRequest),
     /// Pay Offer
     PayOffer(PayOfferRequest),
     /// Multiple Pay Offer
@@ -321,7 +315,6 @@ impl Serialize for RequestParams {
             RequestParams::CancelHoldInvoice(p) => p.serialize(serializer),
             RequestParams::SettleHoldInvoice(p) => p.serialize(serializer),
             RequestParams::MakeOffer(p) => p.serialize(serializer),
-            RequestParams::LookupOffer(p) => p.serialize(serializer),
             RequestParams::PayOffer(p) => p.serialize(serializer),
             RequestParams::MultiPayOffer(p) => p.serialize(serializer),
             RequestParams::GetOfferInfo(p) => p.serialize(serializer),
@@ -540,13 +533,6 @@ pub struct MakeOfferRequest {
     pub single_use: Option<bool>,
 }
 
-/// Lookup Offer Request
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LookupOfferRequest {
-    /// Encoded bolt12 Offer
-    pub offer: String,
-}
-
 /// Pay Offer Request
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PayOfferRequest {
@@ -717,10 +703,6 @@ impl Request {
             Method::MakeOffer => {
                 let params: MakeOfferRequest = serde_json::from_value(template.params)?;
                 RequestParams::MakeOffer(params)
-            }
-            Method::LookupOffer => {
-                let params: LookupOfferRequest = serde_json::from_value(template.params)?;
-                RequestParams::LookupOffer(params)
             }
             Method::PayOffer => {
                 let params: PayOfferRequest = serde_json::from_value(template.params)?;
@@ -1003,37 +985,6 @@ pub struct CancelHoldInvoiceResponse {}
 /// Settle Hold Invoice Response
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SettleHoldInvoiceResponse {}
-/// Lookup Offer Response
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LookupOfferResponse {
-    /// Transaction type
-    #[serde(rename = "type")]
-    pub transaction_type: TransactionType,
-    /// Encoded bolt12 offer
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub offer: Option<String>,
-    /// Offer description
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Offer amount in msats
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub amount: Option<u64>,
-    /// the id of the offer, for a bolt12 invoice
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub offer_id: Option<String>,
-    /// Offer issuer
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub issuer: Option<String>,
-    /// Offer creation time
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<Timestamp>,
-    /// Offer expiry
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<Timestamp>,
-    /// Offer metadata
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Value>,
-}
 
 /// Pay Offer Response
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -1095,8 +1046,6 @@ pub enum ResponseResult {
     SettleHoldInvoice(SettleHoldInvoiceResponse),
     /// Make Offer
     MakeOffer(MakeOfferResponse),
-    /// Lookup Offer
-    LookupOffer(LookupOfferResponse),
     /// Pay Offer
     PayOffer(PayOfferResponse),
     /// Multiple Pay Offer
@@ -1128,7 +1077,6 @@ impl Serialize for ResponseResult {
             ResponseResult::CancelHoldInvoice(p) => p.serialize(serializer),
             ResponseResult::SettleHoldInvoice(p) => p.serialize(serializer),
             ResponseResult::MakeOffer(p) => p.serialize(serializer),
-            ResponseResult::LookupOffer(p) => p.serialize(serializer),
             ResponseResult::PayOffer(p) => p.serialize(serializer),
             ResponseResult::MultiPayOffer(p) => p.serialize(serializer),
             ResponseResult::GetOfferInfo(p) => p.serialize(serializer),
@@ -1232,10 +1180,6 @@ impl Response {
                 Method::MakeOffer => {
                     let result: MakeOfferResponse = serde_json::from_value(result)?;
                     ResponseResult::MakeOffer(result)
-                }
-                Method::LookupOffer => {
-                    let result: LookupOfferResponse = serde_json::from_value(result)?;
-                    ResponseResult::LookupOffer(result)
                 }
                 Method::PayOffer => {
                     let result: PayOfferResponse = serde_json::from_value(result)?;
